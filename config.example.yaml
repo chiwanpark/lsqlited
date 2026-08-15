@@ -32,6 +32,20 @@ params:
   _journal_mode: WAL
   _foreign_keys: true
 
+# Loadable SQLite extensions registered on every connection to every database
+# below. Each entry is either the path of a shared library, or a mapping that
+# also names the initialization symbol to call. Extensions listed on an
+# individual database are loaded in addition to these.
+#
+# Extensions run inside the daemon with its full privileges, so only load
+# libraries you trust.
+extensions:
+  # Entry point left to SQLite: sqlite3_extension_init, or a name derived
+  # from the file name.
+  - /usr/lib/sqlite3/vector0.so
+  - path: /usr/lib/sqlite3/misc.so
+    entrypoint: sqlite3_misc_init
+
 # Client authentication. Omit the whole section (or leave `users` empty) to
 # accept every connection without authenticating it. Clients then pass their
 # credentials in the DSN: lsqlited://alice:s3cret@127.0.0.1:7890/app
@@ -81,6 +95,11 @@ databases:
     # Extra SQLite DSN parameters appended to the file: URI used to open this
     # database. Use mode=ro to serve a database read-only.
     params: mode=ro&immutable=true
+    # Extensions loaded for this database only, after the global ones above.
+    # Repeating a global extension here is a no-op.
+    extensions:
+      - path: /usr/lib/sqlite3/spellfix.so
+        entrypoint: sqlite3_spellfix_init
   cached:
     path: /var/lib/lsqlited/cached.sqlite3
     # The mapping form works too.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 
@@ -20,6 +21,7 @@ import (
 //	  host: 127.0.0.1
 //	  port: 7890
 //	params: _journal_mode=WAL
+//	extensions: [/usr/lib/sqlite3/vector0.so]
 //	tls:
 //	  cert: /etc/lsqlited/server.crt
 //	  key: /etc/lsqlited/server.key
@@ -39,6 +41,10 @@ type Config struct {
 	// Params are SQLite DSN query parameters applied to every database.
 	// Per-database params take precedence over them.
 	Params Params `yaml:"params"`
+	// Extensions are loadable SQLite extensions registered on every
+	// connection to every database. Per-database extensions are loaded
+	// after them.
+	Extensions Extensions `yaml:"extensions"`
 	// TLS configures transport security. When it is omitted the wire
 	// protocol travels in cleartext.
 	TLS TLSConfig `yaml:"tls"`
@@ -230,6 +236,147 @@ type DatabaseConfig struct {
 	// immutable=true. They override the server-wide Config.Params. See the
 	// go-sqlite3 documentation for the full list of supported parameters.
 	Params Params `yaml:"params"`
+	// Extensions are loadable SQLite extensions registered on every
+	// connection to this database, in addition to the server-wide
+	// Config.Extensions.
+	Extensions Extensions `yaml:"extensions"`
+}
+
+// Extension identifies an external SQLite extension to load into every
+// connection of a database. In YAML it may be written either as a plain
+// path or as a mapping naming the entry point:
+//
+//	extensions:
+//	  - /usr/lib/sqlite3/vector0.so
+//	  - path: /usr/lib/sqlite3/misc.so
+//	    entrypoint: sqlite3_misc_init
+type Extension struct {
+	// Path is the filesystem path of the shared library to load. The
+	// platform's dynamic loader resolves it, so a bare file name is looked
+	// up along the usual search path.
+	Path string `yaml:"path"`
+	// Entrypoint is the initialization symbol to call. When empty, SQLite
+	// picks the default one: sqlite3_extension_init, falling back to a
+	// name derived from the file name.
+	Entrypoint string `yaml:"entrypoint"`
+}
+
+// String renders the extension the way it is written in the configuration.
+func (e Extension) String() string {
+	if e.Entrypoint == "" {
+		return e.Path
+	}
+	return e.Path + ":" + e.Entrypoint
+}
+
+// UnmarshalYAML accepts either a path or a mapping.
+func (e *Extension) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		var path string
+		if err := node.Decode(&path); err != nil {
+			return err
+		}
+		*e = Extension{Path: path}
+		return nil
+	case yaml.MappingNode:
+		// Node.Decode does not inherit the decoder's KnownFields setting,
+		// so unknown keys are rejected by hand to keep typos loud.
+		if err := knownFields(node, "path", "entrypoint"); err != nil {
+			return err
+		}
+		// The local type drops the UnmarshalYAML method, avoiding recursion.
+		type plain Extension
+		var ext plain
+		if err := node.Decode(&ext); err != nil {
+			return err
+		}
+		*e = Extension(ext)
+		return nil
+	default:
+		return fmt.Errorf("extension must be a path or a mapping")
+	}
+}
+
+// knownFields rejects mapping keys outside the allowed set.
+func knownFields(node *yaml.Node, allowed ...string) error {
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		key := node.Content[i].Value
+		if !slices.Contains(allowed, key) {
+			return fmt.Errorf("field %s not found in type server.Extension", key)
+		}
+	}
+	return nil
+}
+
+// Extensions is an ordered list of SQLite extensions. They are loaded in the
+// order they are listed, except that entries without an explicit entry point
+// are loaded first.
+type Extensions []Extension
+
+// merge returns the extensions of e followed by those of override, dropping
+// entries that are already present. It lets a database repeat a server-wide
+// extension without loading it twice.
+func (e Extensions) merge(override Extensions) Extensions {
+	if len(e) == 0 && len(override) == 0 {
+		return nil
+	}
+	merged := make(Extensions, 0, len(e)+len(override))
+	seen := make(map[Extension]struct{}, len(e)+len(override))
+	add := func(exts Extensions) {
+		for _, ext := range exts {
+			if _, dup := seen[ext]; dup {
+				continue
+			}
+			seen[ext] = struct{}{}
+			merged = append(merged, ext)
+		}
+	}
+	add(e)
+	add(override)
+	return merged
+}
+
+// defaultEntrypoints returns the paths of the extensions that do not name an
+// entry point, letting SQLite work it out on its own.
+func (e Extensions) defaultEntrypoints() []string {
+	var paths []string
+	for _, ext := range e {
+		if ext.Entrypoint == "" {
+			paths = append(paths, ext.Path)
+		}
+	}
+	return paths
+}
+
+// strings renders the extensions for logs and error messages.
+func (e Extensions) strings() []string {
+	if len(e) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(e))
+	for _, ext := range e {
+		out = append(out, ext.String())
+	}
+	return out
+}
+
+// validate rejects empty paths and exact duplicates.
+func (e Extensions) validate() error {
+	seen := make(map[Extension]struct{}, len(e))
+	for i, ext := range e {
+		if strings.TrimSpace(ext.Path) == "" {
+			return fmt.Errorf("[%d]: path must not be empty", i)
+		}
+		if ext.Entrypoint != strings.TrimSpace(ext.Entrypoint) {
+			return fmt.Errorf("[%d]: entrypoint %q must not have surrounding whitespace", i, ext.Entrypoint)
+		}
+		if _, dup := seen[ext]; dup {
+			return fmt.Errorf("[%d]: extension %s is listed twice", i, ext)
+		}
+		seen[ext] = struct{}{}
+	}
+	return nil
 }
 
 // Params holds extra SQLite DSN query parameters. In YAML it may be written
@@ -352,6 +499,9 @@ func (c *Config) Validate() error {
 	if err := c.Params.validate(); err != nil {
 		return fmt.Errorf("params: %w", err)
 	}
+	if err := c.Extensions.validate(); err != nil {
+		return fmt.Errorf("extensions%w", err)
+	}
 	if err := c.TLS.validate(); err != nil {
 		return err
 	}
@@ -367,6 +517,9 @@ func (c *Config) Validate() error {
 		}
 		if err := db.Params.validate(); err != nil {
 			return fmt.Errorf("databases.%s.params: %w", name, err)
+		}
+		if err := db.Extensions.validate(); err != nil {
+			return fmt.Errorf("databases.%s.extensions%w", name, err)
 		}
 	}
 	// Validated last so that grants are checked against known-good databases.

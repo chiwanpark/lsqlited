@@ -69,7 +69,7 @@ func TestSQLiteDSN(t *testing.T) {
 func TestOpenSQLiteWithParams(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app.sqlite3")
 
-	rw, err := openSQLite(DatabaseConfig{Path: path}, nil)
+	rw, err := openSQLite(DatabaseConfig{Path: path}, nil, nil)
 	if err != nil {
 		t.Fatalf("open read-write: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestOpenSQLiteWithParams(t *testing.T) {
 	immutable, err := openSQLite(DatabaseConfig{
 		Path:   path,
 		Params: Params{"immutable": "true"},
-	}, Params{"mode": "ro"})
+	}, Params{"mode": "ro"}, nil)
 	if err != nil {
 		t.Fatalf("open immutable: %v", err)
 	}

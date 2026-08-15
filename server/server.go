@@ -14,15 +14,20 @@ import (
 	"net"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/chiwanpark/lsqlited/internal/auth"
 	"github.com/chiwanpark/lsqlited/internal/protocol"
-	_ "github.com/mattn/go-sqlite3" // CGO-based SQLite driver, registered as "sqlite3"
+	sqlite3 "github.com/mattn/go-sqlite3" // CGO-based SQLite driver, registered as "sqlite3"
 )
 
 const defaultBusyTimeoutMS = 5000
+
+// baseDriverName is the driver registered by go-sqlite3 itself, used for
+// databases that load no extension.
+const baseDriverName = "sqlite3"
 
 // tlsHandshakeTimeout bounds how long a client may take to complete the TLS
 // handshake, so that a peer that connects and then goes quiet cannot pin a
@@ -322,9 +327,13 @@ func (s *Server) getDB(name string) (*sql.DB, error) {
 	if !ok {
 		return nil, fmt.Errorf("unknown database %q", name)
 	}
-	db, err := openSQLite(cfg, s.cfg.Params)
+	db, err := openSQLite(cfg, s.cfg.Params, s.cfg.Extensions)
 	if err != nil {
 		return nil, fmt.Errorf("open database %q: %w", name, err)
+	}
+	if len(s.cfg.Extensions) > 0 || len(cfg.Extensions) > 0 {
+		s.logger.Debug("loaded sqlite extensions", "database", name,
+			"extensions", s.cfg.Extensions.merge(cfg.Extensions).strings())
 	}
 	s.dbs[name] = db
 	return db, nil
@@ -344,16 +353,80 @@ func sqliteDSN(cfg DatabaseConfig, global Params) string {
 	return "file:" + cfg.Path + "?" + q.Encode()
 }
 
-func openSQLite(cfg DatabaseConfig, global Params) (*sql.DB, error) {
-	db, err := sql.Open("sqlite3", sqliteDSN(cfg, global))
+func openSQLite(cfg DatabaseConfig, global Params, globalExts Extensions) (*sql.DB, error) {
+	exts := globalExts.merge(cfg.Extensions)
+	db, err := sql.Open(sqliteDriver(exts), sqliteDSN(cfg, global))
 	if err != nil {
 		return nil, err
 	}
+	// Extensions are loaded when a connection is made, not by sql.Open, so
+	// a missing library only surfaces on the first use. Pinging here keeps
+	// that failure attached to opening the database rather than to whatever
+	// query happened to run first.
 	if err := db.Ping(); err != nil {
 		db.Close()
+		if len(exts) > 0 {
+			return nil, fmt.Errorf("%w (extensions: %s)", err, strings.Join(exts.strings(), ", "))
+		}
 		return nil, err
 	}
 	return db, nil
+}
+
+// sqliteDrivers memoizes the driver registered for a given set of
+// extensions. database/sql panics when the same driver name is registered
+// twice, so a server that is restarted, or two databases sharing a set of
+// extensions, must reuse the driver registered the first time around.
+var sqliteDrivers = struct {
+	sync.Mutex
+	names map[string]string
+}{names: make(map[string]string)}
+
+// sqliteDriver returns the name of a database/sql driver that loads exts
+// into every connection it opens, registering one if needed. Extensions
+// cannot be attached to an existing connection pool, so each distinct set
+// needs a driver of its own.
+func sqliteDriver(exts Extensions) string {
+	if len(exts) == 0 {
+		return baseDriverName
+	}
+	key := strings.Join(exts.strings(), "\x00")
+	sqliteDrivers.Lock()
+	defer sqliteDrivers.Unlock()
+	if name, ok := sqliteDrivers.names[key]; ok {
+		return name
+	}
+	name := fmt.Sprintf("%s_ext%d", baseDriverName, len(sqliteDrivers.names)+1)
+	sql.Register(name, &sqlite3.SQLiteDriver{
+		// Entries without an entry point are handed to the driver, which
+		// lets SQLite derive the initialization symbol itself.
+		Extensions:  exts.defaultEntrypoints(),
+		ConnectHook: extensionHook(exts),
+	})
+	sqliteDrivers.names[key] = name
+	return name
+}
+
+// extensionHook returns a connect hook loading every extension that names an
+// entry point, or nil when none does.
+func extensionHook(exts Extensions) func(*sqlite3.SQLiteConn) error {
+	var named Extensions
+	for _, ext := range exts {
+		if ext.Entrypoint != "" {
+			named = append(named, ext)
+		}
+	}
+	if len(named) == 0 {
+		return nil
+	}
+	return func(conn *sqlite3.SQLiteConn) error {
+		for _, ext := range named {
+			if err := conn.LoadExtension(ext.Path, ext.Entrypoint); err != nil {
+				return fmt.Errorf("load extension %s: %w", ext, err)
+			}
+		}
+		return nil
+	}
 }
 
 // queryer abstracts *sql.DB and *sql.Tx.

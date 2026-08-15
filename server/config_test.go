@@ -82,6 +82,51 @@ databases:
 	}
 }
 
+// TestLoadConfigExtensions covers both spellings of an extension entry and
+// the way the global list combines with a per-database one.
+func TestLoadConfigExtensions(t *testing.T) {
+	path := writeConfig(t, `
+listen: {port: 7890}
+extensions:
+  - /usr/lib/sqlite3/vector0.so
+  - path: /usr/lib/sqlite3/misc.so
+    entrypoint: sqlite3_misc_init
+databases:
+  app:
+    path: /tmp/app.sqlite3
+    extensions:
+      - /usr/lib/sqlite3/fts5.so
+      # Repeating a server-wide extension is a no-op, not a second load.
+      - /usr/lib/sqlite3/vector0.so
+  plain:
+    path: /tmp/plain.sqlite3
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	want := Extensions{
+		{Path: "/usr/lib/sqlite3/vector0.so"},
+		{Path: "/usr/lib/sqlite3/misc.so", Entrypoint: "sqlite3_misc_init"},
+	}
+	if len(cfg.Extensions) != len(want) {
+		t.Fatalf("extensions = %v, want %v", cfg.Extensions, want)
+	}
+	for i := range want {
+		if cfg.Extensions[i] != want[i] {
+			t.Errorf("extensions[%d] = %v, want %v", i, cfg.Extensions[i], want[i])
+		}
+	}
+
+	merged := cfg.Extensions.merge(cfg.Databases["app"].Extensions)
+	if got := merged.strings(); len(got) != 3 || got[2] != "/usr/lib/sqlite3/fts5.so" {
+		t.Errorf("app extensions = %v, want the global ones followed by fts5", got)
+	}
+	if got := cfg.Extensions.merge(cfg.Databases["plain"].Extensions); len(got) != 2 {
+		t.Errorf("plain extensions = %v, want only the global ones", got)
+	}
+}
+
 func TestParseParams(t *testing.T) {
 	params, err := ParseParams("?mode=ro&immutable=true")
 	if err != nil {
@@ -169,6 +214,49 @@ databases:
     path: /tmp/app.sqlite3
     params:
       "": ro
+`,
+		"empty extension path": `
+listen: {port: 7890}
+extensions: [""]
+databases:
+  app: {path: /tmp/app.sqlite3}
+`,
+		"extension mapping without a path": `
+listen: {port: 7890}
+databases:
+  app:
+    path: /tmp/app.sqlite3
+    extensions:
+      - entrypoint: sqlite3_misc_init
+`,
+		"duplicate extension": `
+listen: {port: 7890}
+extensions: [/tmp/a.so, /tmp/a.so]
+databases:
+  app: {path: /tmp/app.sqlite3}
+`,
+		"unknown extension field": `
+listen: {port: 7890}
+extensions:
+  - path: /tmp/a.so
+    entry_point: sqlite3_a_init
+databases:
+  app: {path: /tmp/app.sqlite3}
+`,
+		"extension of wrong type": `
+listen: {port: 7890}
+databases:
+  app:
+    path: /tmp/app.sqlite3
+    extensions:
+      - [/tmp/a.so]
+`,
+		"extensions of wrong type": `
+listen: {port: 7890}
+extensions:
+  vector: /tmp/a.so
+databases:
+  app: {path: /tmp/app.sqlite3}
 `,
 		"user without credentials": `
 listen: {port: 7890}
@@ -432,6 +520,12 @@ func TestExampleConfig(t *testing.T) {
 	}
 	if len(cfg.Auth.Users) == 0 {
 		t.Error("the example config should show a working auth section")
+	}
+	if len(cfg.Extensions) == 0 {
+		t.Error("the example config should show global extensions")
+	}
+	if len(cfg.Databases["archive"].Extensions) == 0 {
+		t.Error("the example config should show per-database extensions")
 	}
 }
 

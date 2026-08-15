@@ -27,6 +27,9 @@ listen:
 
 params: _journal_mode=WAL # SQLite open parameters for every database
 
+extensions:               # loadable extensions for every database
+- /usr/lib/sqlite3/vector0.so
+
 databases:
   app:
     path: /var/lib/lsqlited/app.sqlite3
@@ -65,6 +68,30 @@ params:
 ```
 
 Parameters are appended to the `file:` URI handed to SQLite, so anything the [go-sqlite3 driver](https://pkg.go.dev/github.com/mattn/go-sqlite3#hdr-Connection_String) understands works — `mode`, `immutable`, `cache`, `vfs`, `_journal_mode`, `_foreign_keys`, `_txlock`, and so on.
+
+### Extensions
+
+External SQLite extensions are listed with the top-level `extensions` key, which applies to every database, and with `databases.<name>.extensions`, which applies to one. The daemon loads them into every connection it opens to that database, so the functions, collations, and virtual tables they provide are available to all clients:
+
+```yaml
+extensions:
+- /usr/lib/sqlite3/vector0.so           # entry point left to SQLite
+- path: /usr/lib/sqlite3/misc.so        # explicit initialization symbol
+  entrypoint: sqlite3_misc_init
+
+databases:
+  archive:
+    path: /var/lib/lsqlited/archive.sqlite3
+    extensions:                           # loaded for this database only
+    - path: /usr/lib/sqlite3/spellfix.so
+      entrypoint: sqlite3_spellfix_init
+```
+
+An entry is either the path of a shared library or a mapping with `path` and an optional `entrypoint`. Without `entrypoint`, SQLite picks the initialization symbol itself: `sqlite3_extension_init`, falling back to a name derived from the file name (`spellfix.so` → `sqlite3_spellfix_init`). Paths are resolved by the platform's dynamic loader, so a bare file name is looked up along the usual search path.
+
+A database loads the global extensions first, then its own, except that entries without an `entrypoint` are loaded before those with one; repeating a global extension under a database is a no-op. A library that cannot be loaded fails the database at open time, and the error names it.
+
+Extensions are not part of the wire protocol: clients cannot ask for one, and `load_extension()` remains unavailable in queries. They run in the daemon's process with its privileges, so load only libraries you trust.
 
 ### TLS
 
@@ -239,6 +266,7 @@ When the server has authentication enabled, a session must complete the `auth_in
 
 - Query results are fully buffered in memory before being sent, so very large result sets are subject to the 64 MiB message limit.
 - Access control is per database, not per table or per statement: an account that may reach a database may read and write all of it. Use `params: mode=ro` to serve a database read-only to everyone.
+- Extensions are loaded from the configuration file only, and a change to the list takes effect when the daemon restarts.
 - Named query parameters and custom transaction isolation levels are not supported.
 
 ## Development
