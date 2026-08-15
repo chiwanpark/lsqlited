@@ -13,17 +13,32 @@
 //
 // The DSN has the form:
 //
-//	lsqlited://[user:password@]host:port/database[?dial_timeout=10s]
+//	lsqlited://[user:password@]host:port/database[?param=value&...]
 //
 // where database is the logical database name configured on the server. When
 // credentials are present the driver performs a challenge-response handshake
 // on every new connection; the password itself is never transmitted.
+//
+// Supported parameters:
+//
+//	dial_timeout     TCP connect and TLS handshake timeout (default 10s)
+//	ssl_mode         disable (default), require, verify-ca, or verify-full
+//	ssl_ca           PEM bundle of CAs trusted to sign the server certificate
+//	ssl_cert         client certificate presented for mutual TLS
+//	ssl_key          private key matching ssl_cert
+//	ssl_server_name  host name to verify instead of the one dialed
+//
+// Naming any ssl_* parameter other than ssl_mode turns on verify-full, so a
+// DSN that points at a CA bundle is encrypted and verified by default:
+//
+//	lsqlited://alice:s3cret@db.example.com:7890/app?ssl_ca=/etc/ssl/ca.pem
 package lsqlited
 
 import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/tls"
 	"database/sql"
 	"database/sql/driver"
 	"encoding/base64"
@@ -32,6 +47,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -85,6 +101,8 @@ type dsnConfig struct {
 	dialTimeout time.Duration
 	username    string
 	password    string
+	// tls is nil when the connection is plaintext.
+	tls *tls.Config
 }
 
 func parseDSN(dsn string) (*dsnConfig, error) {
@@ -123,7 +141,13 @@ func parseDSN(dsn string) (*dsnConfig, error) {
 		}
 		cfg.password = password
 	}
-	q := u.Query()
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return nil, fmt.Errorf("lsqlited: invalid DSN %q: bad query string: %w", dsn, err)
+	}
+	if err := checkDSNParams(q); err != nil {
+		return nil, fmt.Errorf("lsqlited: invalid DSN %q: %w", dsn, err)
+	}
 	if v := q.Get("dial_timeout"); v != "" {
 		timeout, err := time.ParseDuration(v)
 		if err != nil {
@@ -131,7 +155,42 @@ func parseDSN(dsn string) (*dsnConfig, error) {
 		}
 		cfg.dialTimeout = timeout
 	}
+	ssl, err := parseSSLOptions(q)
+	if err != nil {
+		return nil, fmt.Errorf("lsqlited: invalid DSN %q: %w", dsn, err)
+	}
+	// Certificates are read now rather than per connection, so a typo in a
+	// path is reported by sql.Open instead of by the first query.
+	if cfg.tls, err = ssl.tlsConfig(host); err != nil {
+		return nil, fmt.Errorf("lsqlited: invalid DSN %q: %w", dsn, err)
+	}
 	return cfg, nil
+}
+
+// knownDSNParams is the set of recognized DSN query parameters. Unknown ones
+// are rejected rather than ignored: silently dropping a misspelled ssl_mode
+// would hand the caller a cleartext connection it believed was encrypted.
+var knownDSNParams = map[string]bool{
+	"dial_timeout":    true,
+	"ssl_mode":        true,
+	"ssl_ca":          true,
+	"ssl_cert":        true,
+	"ssl_key":         true,
+	"ssl_server_name": true,
+}
+
+func checkDSNParams(q url.Values) error {
+	unknown := make([]string, 0, len(q))
+	for key := range q {
+		if !knownDSNParams[key] {
+			unknown = append(unknown, key)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+	return fmt.Errorf("unknown parameter(s) %s", strings.Join(unknown, ", "))
 }
 
 type connector struct {
@@ -155,6 +214,9 @@ func (c *connector) Connect(ctx context.Context) (driver.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("lsqlited: dial %s: %w", c.cfg.addr, err)
 	}
+	if nc, err = c.tlsHandshake(ctx, nc); err != nil {
+		return nil, err
+	}
 	cn := &conn{nc: nc, database: c.cfg.database}
 	if c.cfg.username != "" {
 		if err := c.authenticate(ctx, cn); err != nil {
@@ -166,6 +228,32 @@ func (c *connector) Connect(ctx context.Context) (driver.Conn, error) {
 }
 
 func (c *connector) Driver() driver.Driver { return c.driver }
+
+// tlsHandshake upgrades a freshly dialed connection to TLS. It is a no-op
+// when ssl_mode is disable. dial_timeout bounds the handshake too, since a
+// peer that stalls halfway through it is as unreachable as one that never
+// accepts the connection at all.
+func (c *connector) tlsHandshake(ctx context.Context, nc net.Conn) (net.Conn, error) {
+	if c.cfg.tls == nil {
+		return nc, nil
+	}
+	if c.cfg.dialTimeout > 0 {
+		if err := nc.SetDeadline(time.Now().Add(c.cfg.dialTimeout)); err != nil {
+			nc.Close()
+			return nil, fmt.Errorf("lsqlited: %w", err)
+		}
+	}
+	tc := tls.Client(nc, c.cfg.tls)
+	if err := tc.HandshakeContext(ctx); err != nil {
+		tc.Close()
+		return nil, fmt.Errorf("lsqlited: tls handshake with %s: %w", c.cfg.addr, err)
+	}
+	if err := tc.SetDeadline(time.Time{}); err != nil {
+		tc.Close()
+		return nil, fmt.Errorf("lsqlited: %w", err)
+	}
+	return tc, nil
+}
 
 // authenticate runs the challenge-response handshake. The password is used
 // only to derive a proof bound to both peers' nonces, so an observer learns

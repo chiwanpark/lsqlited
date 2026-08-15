@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"encoding/base64"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/chiwanpark/lsqlited/internal/auth"
 	"github.com/chiwanpark/lsqlited/internal/protocol"
@@ -22,12 +24,25 @@ import (
 
 const defaultBusyTimeoutMS = 5000
 
+// tlsHandshakeTimeout bounds how long a client may take to complete the TLS
+// handshake, so that a peer that connects and then goes quiet cannot pin a
+// goroutine indefinitely.
+const tlsHandshakeTimeout = 15 * time.Second
+
 // Option customizes a Server.
 type Option func(*Server)
 
 // WithLogger sets the logger used by the server.
 func WithLogger(logger *slog.Logger) Option {
 	return func(s *Server) { s.logger = logger }
+}
+
+// WithTLSConfig serves TLS using the given configuration, overriding the
+// `tls` section of the configuration file. It is meant for callers that
+// embed the server and manage certificates themselves, for example to rotate
+// them through tls.Config.GetCertificate.
+func WithTLSConfig(cfg *tls.Config) Option {
+	return func(s *Server) { s.tlsConfig = cfg }
 }
 
 // errAuthFailed is deliberately vague: telling the client whether the user
@@ -38,6 +53,10 @@ var errAuthFailed = errors.New("authentication failed")
 type Server struct {
 	cfg    *Config
 	logger *slog.Logger
+
+	// tlsConfig is nil when the server serves plaintext TCP. It is set by
+	// WithTLSConfig or derived from Config.TLS by Start.
+	tlsConfig *tls.Config
 
 	// accounts and authSecret are written once by Start, before any
 	// connection is accepted, and only read afterwards.
@@ -81,10 +100,18 @@ func (s *Server) Start() error {
 	if err := s.initAuth(); err != nil {
 		return err
 	}
+	if err := s.initTLS(); err != nil {
+		return err
+	}
 	addr := net.JoinHostPort(s.cfg.Listen.Host, strconv.Itoa(s.cfg.Listen.Port))
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("server: listen on %s: %w", addr, err)
+	}
+	if s.tlsConfig != nil {
+		// Wrapping the listener keeps the rest of the server working on a
+		// plain net.Conn: TLS is entirely a transport concern here.
+		ln = tls.NewListener(ln, s.tlsConfig)
 	}
 	s.ln = ln
 	s.wg.Add(1)
@@ -108,9 +135,31 @@ func (s *Server) initAuth() error {
 	return nil
 }
 
+// initTLS derives the listener's TLS configuration from the configuration
+// file, unless WithTLSConfig already supplied one.
+func (s *Server) initTLS() error {
+	if s.tlsConfig != nil {
+		return nil
+	}
+	cfg, err := s.cfg.TLS.serverConfig()
+	if err != nil {
+		return fmt.Errorf("server: %w", err)
+	}
+	s.tlsConfig = cfg
+	return nil
+}
+
 // authEnabled reports whether clients must authenticate before issuing any
 // other request.
 func (s *Server) authEnabled() bool { return len(s.accounts) > 0 }
+
+// TLSEnabled reports whether the server encrypts its connections. It is only
+// meaningful once Start has returned.
+func (s *Server) TLSEnabled() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tlsConfig != nil
+}
 
 // account returns the account of user. Unknown users get a stable decoy so
 // that the challenge does not reveal whether the account exists.
@@ -207,10 +256,14 @@ func (s *Server) handleConn(conn net.Conn) {
 	logger.Debug("connection opened")
 	defer logger.Debug("connection closed")
 
+	ctx := context.Background()
+	if !tlsHandshake(ctx, conn, logger) {
+		return
+	}
+
 	sess := &session{srv: s, logger: logger}
 	defer sess.cleanup()
 
-	ctx := context.Background()
 	for {
 		var req protocol.Request
 		if err := protocol.ReadMessage(conn, &req); err != nil {
@@ -227,6 +280,32 @@ func (s *Server) handleConn(conn net.Conn) {
 			return
 		}
 	}
+}
+
+// tlsHandshake completes the TLS handshake, if any, under a deadline. Doing
+// it here rather than letting the first Read trigger it lets the server log a
+// handshake failure and bound how long it waits for one. It reports whether
+// the connection is ready to carry requests.
+func tlsHandshake(ctx context.Context, conn net.Conn, logger *slog.Logger) bool {
+	tc, ok := conn.(*tls.Conn)
+	if !ok {
+		return true
+	}
+	if err := tc.SetDeadline(time.Now().Add(tlsHandshakeTimeout)); err != nil {
+		return false
+	}
+	if err := tc.HandshakeContext(ctx); err != nil {
+		logger.Debug("tls handshake failed", "error", err)
+		return false
+	}
+	if err := tc.SetDeadline(time.Time{}); err != nil {
+		return false
+	}
+	state := tc.ConnectionState()
+	logger.Debug("tls established",
+		"version", tls.VersionName(state.Version),
+		"cipher", tls.CipherSuiteName(state.CipherSuite))
+	return true
 }
 
 // getDB returns the lazily opened *sql.DB for a configured database name.

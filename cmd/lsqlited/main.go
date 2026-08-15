@@ -52,7 +52,14 @@ func main() {
 		logger.Error("failed to start server", "error", err)
 		os.Exit(1)
 	}
-	logger.Info("lsqlited started", "addr", srv.Addr(), "databases", len(cfg.Databases))
+	logger.Info("lsqlited started",
+		"addr", srv.Addr(),
+		"databases", len(cfg.Databases),
+		"tls", srv.TLSEnabled(),
+		"auth", len(cfg.Auth.Users) > 0)
+	if !srv.TLSEnabled() {
+		logger.Warn("TLS is disabled, queries and results travel in cleartext")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

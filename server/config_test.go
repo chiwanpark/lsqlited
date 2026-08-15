@@ -420,6 +420,21 @@ databases:
 	}
 }
 
+// TestExampleConfig keeps the shipped example in step with the schema:
+// KnownFields is on, so a stale key or a renamed section fails here.
+func TestExampleConfig(t *testing.T) {
+	cfg, err := LoadConfig(filepath.Join("..", "config.example.yaml"))
+	if err != nil {
+		t.Fatalf("LoadConfig(config.example.yaml): %v", err)
+	}
+	if !cfg.TLS.Enabled() {
+		t.Error("the example config should show a working tls section")
+	}
+	if len(cfg.Auth.Users) == 0 {
+		t.Error("the example config should show a working auth section")
+	}
+}
+
 func TestLoadConfigMissingFile(t *testing.T) {
 	if _, err := LoadConfig(filepath.Join(t.TempDir(), "nope.yaml")); err == nil {
 		t.Error("expected error for missing file")

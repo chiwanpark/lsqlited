@@ -66,6 +66,32 @@ params:
 
 Parameters are appended to the `file:` URI handed to SQLite, so anything the [go-sqlite3 driver](https://pkg.go.dev/github.com/mattn/go-sqlite3#hdr-Connection_String) understands works — `mode`, `immutable`, `cache`, `vfs`, `_journal_mode`, `_foreign_keys`, `_txlock`, and so on.
 
+### TLS
+
+Without a `tls` section the daemon serves plaintext TCP and everything — queries, results, and the databases they contain — is readable by anyone on the path. Point it at a certificate and key to encrypt the transport:
+
+```yaml
+tls:
+  cert: /etc/lsqlited/server.crt   # PEM certificate, intermediates appended
+  key: /etc/lsqlited/server.key    # PEM private key
+  client_ca: /etc/lsqlited/ca.crt  # optional: require client certificates
+  min_version: "1.2"               # optional: "1.2" (default) or "1.3"
+```
+
+Clients then ask for TLS in the DSN:
+
+```go
+db, err := sql.Open("lsqlited", "lsqlited://alice:s3cret@db.example.com:7890/app?ssl_ca=/etc/ssl/ca.crt")
+```
+
+A certificate for testing can be generated with `openssl`:
+
+```sh
+openssl req -x509 -newkey rsa:4096 -nodes -days 365 \
+  -keyout server.key -out server.crt \
+  -subj '/CN=db.example.com' -addext 'subjectAltName=DNS:db.example.com'
+```
+
 ### Authentication
 
 By default the daemon accepts every connection. Adding an `auth.users` section turns on authentication for all clients:
@@ -149,19 +175,38 @@ func main() {
 The DSN has the form:
 
 ```
-lsqlited://[user:password@]host:port/database[?dial_timeout=10s]
+lsqlited://[user:password@]host:port/database[?param=value&...]
 ```
 
 - `database` is the logical name configured on the server.
 - `port` defaults to `7890` when omitted.
-- `dial_timeout` sets the TCP connect timeout (default `10s`).
 - `user:password` are required when the server has authentication enabled; percent-encode any reserved characters. Supplying one without the other is an error.
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `dial_timeout` | `10s` | TCP connect and TLS handshake timeout |
+| `ssl_mode` | `disable` | `disable`, `require`, `verify-ca`, or `verify-full` |
+| `ssl_ca` | system pool | PEM bundle of CAs trusted to sign the server certificate |
+| `ssl_cert` | | Client certificate presented for mutual TLS |
+| `ssl_key` | | Private key matching `ssl_cert` |
+| `ssl_server_name` | the host dialed | Name to verify and send as SNI |
+
+The SSL modes follow the familiar libpq semantics:
+
+| Mode | Encrypted | Chain checked | Host name checked |
+| --- | --- | --- | --- |
+| `disable` | no | no | no |
+| `require` | yes | no | no |
+| `verify-ca` | yes | yes | no |
+| `verify-full` | yes | yes | yes |
 
 Transactions (`db.Begin` / `db.BeginTx`), prepared statements, and context cancellation are supported. Query parameters are positional (`?`); named parameters are not supported.
 
 ## Wire Protocol
 
 The protocol is intentionally simple: each message is a 4-byte big-endian length header followed by a JSON body (at most 64 MiB). The client sends a request and receives exactly one response.
+
+There is no in-band upgrade to TLS: a listener either speaks TLS or it does not, and the framing below is what flows inside the TLS session. A plaintext client therefore cannot be tricked into downgrading, and it also means the server and its clients must agree on TLS out of band.
 
 Request:
 
@@ -193,7 +238,6 @@ When the server has authentication enabled, a session must complete the `auth_in
 ## Limitations
 
 - Query results are fully buffered in memory before being sent, so very large result sets are subject to the 64 MiB message limit.
-- Authentication protects the credentials, but the connection itself is not encrypted: queries and results travel in cleartext. Run it on a trusted network or behind a tunnel.
 - Access control is per database, not per table or per statement: an account that may reach a database may read and write all of it. Use `params: mode=ro` to serve a database read-only to everyone.
 - Named query parameters and custom transaction isolation levels are not supported.
 

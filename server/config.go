@@ -20,6 +20,9 @@ import (
 //	  host: 127.0.0.1
 //	  port: 7890
 //	params: _journal_mode=WAL
+//	tls:
+//	  cert: /etc/lsqlited/server.crt
+//	  key: /etc/lsqlited/server.key
 //	auth:
 //	  users:
 //	    alice:
@@ -36,6 +39,9 @@ type Config struct {
 	// Params are SQLite DSN query parameters applied to every database.
 	// Per-database params take precedence over them.
 	Params Params `yaml:"params"`
+	// TLS configures transport security. When it is omitted the wire
+	// protocol travels in cleartext.
+	TLS TLSConfig `yaml:"tls"`
 	// Auth configures client authentication. When no users are listed the
 	// server accepts every connection without authenticating it.
 	Auth      AuthConfig                `yaml:"auth"`
@@ -345,6 +351,9 @@ func (c *Config) Validate() error {
 	}
 	if err := c.Params.validate(); err != nil {
 		return fmt.Errorf("params: %w", err)
+	}
+	if err := c.TLS.validate(); err != nil {
+		return err
 	}
 	if len(c.Databases) == 0 {
 		return fmt.Errorf("at least one database must be configured")

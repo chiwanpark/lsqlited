@@ -6,6 +6,24 @@ listen:
   # TCP port to listen on.
   port: 7890
 
+# Transport security. Omit the whole section to serve plaintext TCP, in which
+# case queries and results are readable by anyone on the path. Clients opt in
+# with the ssl_* DSN parameters:
+#   lsqlited://alice:s3cret@db.example.com:7890/app?ssl_ca=/etc/ssl/ca.crt
+tls:
+  # PEM certificate presented to clients. If it was signed by an intermediate
+  # CA, append the intermediates to this file so clients can build the chain.
+  cert: /etc/lsqlited/server.crt
+  # PEM private key matching `cert`. Keep it readable only by the daemon.
+  key: /etc/lsqlited/server.key
+  # Optional: PEM bundle of CAs allowed to sign client certificates. Setting
+  # it turns on mutual TLS, so clients must present a certificate of their
+  # own (ssl_cert/ssl_key in the DSN). This authenticates the connection;
+  # accounts are still authenticated by `auth` below.
+  client_ca: /etc/lsqlited/clients-ca.crt
+  # Optional: lowest TLS version to negotiate, "1.2" (default) or "1.3".
+  min_version: "1.2"
+
 # SQLite open parameters applied to every database below. Accepts a query
 # string (params: _journal_mode=WAL&cache=shared) or a mapping. Parameters set
 # on an individual database take precedence over these.
