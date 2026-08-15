@@ -24,6 +24,7 @@ import (
 //	  users:
 //	    alice:
 //	      verifier: "SCRAM-SHA-256$4096:..."
+//	      databases: [app]
 //	databases:
 //	  app:
 //	    path: /var/lib/lsqlited/app.sqlite3
@@ -53,8 +54,8 @@ type AuthConfig struct {
 	Users map[string]UserConfig `yaml:"users"`
 }
 
-// UserConfig holds the credentials of a single account. Exactly one of
-// Verifier and Password must be set.
+// UserConfig holds the credentials of a single account and the databases it
+// may access. Exactly one of Verifier and Password must be set.
 type UserConfig struct {
 	// Verifier is a precomputed credential in the form
 	// "SCRAM-SHA-256$<iterations>:<salt>$<storedKey>:<serverKey>", as
@@ -65,6 +66,55 @@ type UserConfig struct {
 	// configuration is loaded. Convenient, but it leaves the password
 	// readable in the configuration file.
 	Password string `yaml:"password"`
+	// Databases lists the logical database names the account may use. Every
+	// name must match an entry under Config.Databases.
+	//
+	// Omitting the key grants access to every configured database. An
+	// explicit empty list (databases: []) grants access to none, which
+	// suspends the account without deleting its credentials.
+	Databases []string `yaml:"databases"`
+}
+
+// Account is the runtime form of a UserConfig: a credential together with
+// the set of databases it may reach.
+type Account struct {
+	// Verifier holds the material used to check the client proof.
+	Verifier *auth.Verifier
+	// databases is the set of database names the account may access, or nil
+	// when it may access all of them.
+	databases map[string]struct{}
+}
+
+// CanAccess reports whether the account may use the named database.
+func (a *Account) CanAccess(database string) bool {
+	if a.databases == nil {
+		return true
+	}
+	_, ok := a.databases[database]
+	return ok
+}
+
+// account derives the runtime account for the user.
+func (u UserConfig) account(iterations int) (*Account, error) {
+	verifier, err := u.verifier(iterations)
+	if err != nil {
+		return nil, err
+	}
+	return &Account{Verifier: verifier, databases: u.databaseSet()}, nil
+}
+
+// databaseSet returns the granted database names, or nil for unrestricted
+// access. Note that an omitted list decodes to a nil slice while an explicit
+// empty list does not, which is what distinguishes "all" from "none".
+func (u UserConfig) databaseSet() map[string]struct{} {
+	if u.Databases == nil {
+		return nil
+	}
+	set := make(map[string]struct{}, len(u.Databases))
+	for _, name := range u.Databases {
+		set[name] = struct{}{}
+	}
+	return set
 }
 
 // validate checks the credential without running the key derivation.
@@ -93,21 +143,21 @@ func (u UserConfig) verifier(iterations int) (*auth.Verifier, error) {
 	return auth.NewVerifier(u.Password, iterations)
 }
 
-// Credentials derives the verifier of every configured account. It returns
+// Accounts derives the runtime account of every configured user. It returns
 // nil when authentication is disabled.
-func (a AuthConfig) Credentials() (map[string]*auth.Verifier, error) {
+func (a AuthConfig) Accounts() (map[string]*Account, error) {
 	if len(a.Users) == 0 {
 		return nil, nil
 	}
-	creds := make(map[string]*auth.Verifier, len(a.Users))
+	accounts := make(map[string]*Account, len(a.Users))
 	for name, user := range a.Users {
-		v, err := user.verifier(a.iterations())
+		account, err := user.account(a.iterations())
 		if err != nil {
 			return nil, fmt.Errorf("auth.users.%s: %w", name, err)
 		}
-		creds[name] = v
+		accounts[name] = account
 	}
-	return creds, nil
+	return accounts, nil
 }
 
 // iterations returns the configured PBKDF2 iteration count, or the default.
@@ -118,8 +168,10 @@ func (a AuthConfig) iterations() int {
 	return a.Iterations
 }
 
-// validate checks the authentication section.
-func (a AuthConfig) validate() error {
+// validate checks the authentication section. Grants are cross-checked
+// against databases so that a typo in a database name is caught at load
+// time rather than surfacing as a denied query later.
+func (a AuthConfig) validate(databases map[string]DatabaseConfig) error {
 	if a.Iterations != 0 && (a.Iterations < auth.MinIterations || a.Iterations > auth.MaxIterations) {
 		return fmt.Errorf("auth.iterations must be between %d and %d, got %d",
 			auth.MinIterations, auth.MaxIterations, a.Iterations)
@@ -128,8 +180,19 @@ func (a AuthConfig) validate() error {
 		if strings.TrimSpace(name) == "" {
 			return fmt.Errorf("auth.users: user name must not be empty")
 		}
-		if err := a.Users[name].validate(); err != nil {
+		user := a.Users[name]
+		if err := user.validate(); err != nil {
 			return fmt.Errorf("auth.users.%s: %w", name, err)
+		}
+		seen := make(map[string]struct{}, len(user.Databases))
+		for _, database := range user.Databases {
+			if _, ok := databases[database]; !ok {
+				return fmt.Errorf("auth.users.%s.databases: unknown database %q", name, database)
+			}
+			if _, dup := seen[database]; dup {
+				return fmt.Errorf("auth.users.%s.databases: database %q is listed twice", name, database)
+			}
+			seen[database] = struct{}{}
 		}
 	}
 	return nil
@@ -283,9 +346,6 @@ func (c *Config) Validate() error {
 	if err := c.Params.validate(); err != nil {
 		return fmt.Errorf("params: %w", err)
 	}
-	if err := c.Auth.validate(); err != nil {
-		return err
-	}
 	if len(c.Databases) == 0 {
 		return fmt.Errorf("at least one database must be configured")
 	}
@@ -299,6 +359,10 @@ func (c *Config) Validate() error {
 		if err := db.Params.validate(); err != nil {
 			return fmt.Errorf("databases.%s.params: %w", name, err)
 		}
+	}
+	// Validated last so that grants are checked against known-good databases.
+	if err := c.Auth.validate(c.Databases); err != nil {
+		return err
 	}
 	return nil
 }

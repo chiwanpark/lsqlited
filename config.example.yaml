@@ -31,10 +31,22 @@ auth:
       # appears in this file. Generate one with:
       #   printf '%s' 's3cret' | lsqlited -hash-password
       verifier: "SCRAM-SHA-256$4096:4X/1OevPJo0nxVmGMhochg==$hUeU8yswZ8nWH3GIkn1BAc5zwfLC7yDoOiDYnYSunAE=:aX9c/LVO0TcYRedgwLyvphjukETWWUwHn0uFJgprzew="
+      # Databases this account may use. Every name must appear under
+      # `databases` below. Omit the key to grant access to all of them.
+      databases: [app, metrics]
     bob:
       # Convenient, but leaves the password readable in this file. Use only
       # if the file permissions make that acceptable.
       password: hunter2
+      databases: [archive]
+    admin:
+      password: letmein
+      # No `databases` key: access to every database configured below.
+    intern:
+      password: temporary
+      # An empty list grants nothing, which suspends the account without
+      # deleting its credentials.
+      databases: []
 
 # Databases served by this daemon, keyed by logical name. Clients refer to
 # a database by its logical name, e.g. lsqlited://127.0.0.1:7890/app

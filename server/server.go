@@ -39,9 +39,9 @@ type Server struct {
 	cfg    *Config
 	logger *slog.Logger
 
-	// users and authSecret are written once by Start, before any connection
-	// is accepted, and only read afterwards.
-	users      map[string]*auth.Verifier
+	// accounts and authSecret are written once by Start, before any
+	// connection is accepted, and only read afterwards.
+	accounts   map[string]*Account
 	authSecret []byte
 
 	mu     sync.Mutex
@@ -95,7 +95,7 @@ func (s *Server) Start() error {
 // initAuth derives the credentials of every configured account and the
 // per-process secret used to fabricate challenges for unknown users.
 func (s *Server) initAuth() error {
-	users, err := s.cfg.Auth.Credentials()
+	accounts, err := s.cfg.Auth.Accounts()
 	if err != nil {
 		return fmt.Errorf("server: %w", err)
 	}
@@ -103,22 +103,23 @@ func (s *Server) initAuth() error {
 	if err != nil {
 		return fmt.Errorf("server: %w", err)
 	}
-	s.users = users
+	s.accounts = accounts
 	s.authSecret = secret
 	return nil
 }
 
 // authEnabled reports whether clients must authenticate before issuing any
 // other request.
-func (s *Server) authEnabled() bool { return len(s.users) > 0 }
+func (s *Server) authEnabled() bool { return len(s.accounts) > 0 }
 
-// verifier returns the credential of user. Unknown users get a stable decoy
-// so that the challenge does not reveal whether the account exists.
-func (s *Server) verifier(user string) (*auth.Verifier, bool) {
-	if v, ok := s.users[user]; ok {
-		return v, true
+// account returns the account of user. Unknown users get a stable decoy so
+// that the challenge does not reveal whether the account exists.
+func (s *Server) account(user string) (*Account, bool) {
+	if a, ok := s.accounts[user]; ok {
+		return a, true
 	}
-	return auth.DecoyVerifier(s.authSecret, user, s.cfg.Auth.iterations()), false
+	decoy := auth.DecoyVerifier(s.authSecret, user, s.cfg.Auth.iterations())
+	return &Account{Verifier: decoy}, false
 }
 
 // Addr returns the address the server is listening on, or nil if the server
@@ -290,8 +291,9 @@ type session struct {
 	tx     *sql.Tx
 
 	// user is the authenticated account name, empty until the handshake
-	// completes.
-	user string
+	// completes, and account is the matching entry from the configuration.
+	user    string
+	account *Account
 	// pending holds the state of a handshake between auth_init and auth.
 	pending *pendingAuth
 }
@@ -299,7 +301,7 @@ type session struct {
 // pendingAuth is the challenge a session has issued and is waiting on.
 type pendingAuth struct {
 	user        string
-	verifier    *auth.Verifier
+	account     *Account
 	authMessage string
 	// known is false when the challenge was fabricated for an unknown user.
 	known bool
@@ -319,8 +321,17 @@ func (sess *session) handle(ctx context.Context, req *protocol.Request) *protoco
 	case protocol.TypeAuth:
 		return sess.handleAuth(req)
 	}
-	if sess.srv.authEnabled() && sess.user == "" {
-		return errResponse(errors.New("authentication required"))
+	if sess.srv.authEnabled() {
+		if sess.user == "" {
+			return errResponse(errors.New("authentication required"))
+		}
+		// Authorization is checked on every request rather than once at
+		// login: a client is free to name a different database per
+		// request, so the session's initial choice cannot be trusted.
+		if req.Database != "" && !sess.account.CanAccess(req.Database) {
+			sess.logger.Warn("access denied", "user", sess.user, "database", req.Database)
+			return errResponse(fmt.Errorf("access to database %q is not permitted", req.Database))
+		}
 	}
 	switch req.Type {
 	case protocol.TypePing:
@@ -358,11 +369,12 @@ func (sess *session) handleAuthInit(req *protocol.Request) *protocol.Response {
 	if err != nil {
 		return errResponse(err)
 	}
-	verifier, known := sess.srv.verifier(req.User)
+	account, known := sess.srv.account(req.User)
+	verifier := account.Verifier
 	sess.pending = &pendingAuth{
-		user:     req.User,
-		verifier: verifier,
-		known:    known,
+		user:    req.User,
+		account: account,
+		known:   known,
 		authMessage: auth.AuthMessage(req.User, clientNonce, serverNonce,
 			verifier.Salt, verifier.Iterations),
 	}
@@ -388,16 +400,17 @@ func (sess *session) handleAuth(req *protocol.Request) *protocol.Response {
 	}
 	proof, err := base64.StdEncoding.DecodeString(req.Proof)
 	// Always verify, even for unknown users, so that failures cost the same.
-	valid := err == nil && pending.verifier.Verify(pending.authMessage, proof)
+	valid := err == nil && pending.account.Verifier.Verify(pending.authMessage, proof)
 	if !pending.known || !valid {
 		sess.logger.Warn("authentication failed", "user", pending.user)
 		return errResponse(errAuthFailed)
 	}
 	sess.user = pending.user
+	sess.account = pending.account
 	sess.logger.Debug("authenticated", "user", sess.user)
 	return &protocol.Response{
 		Signature: base64.StdEncoding.EncodeToString(
-			pending.verifier.ServerSignature(pending.authMessage)),
+			pending.account.Verifier.ServerSignature(pending.authMessage)),
 	}
 }
 

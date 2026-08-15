@@ -76,8 +76,12 @@ auth:
   users:
     alice:
       verifier: "SCRAM-SHA-256$4096:4X/1Oev...==$hUeU8ys...=:aX9c/LV...="
+      databases: [app, metrics]
     bob:
       password: hunter2
+      databases: [archive]
+    admin:
+      password: letmein   # no `databases` key: every database
 ```
 
 Each account is configured with exactly one of:
@@ -190,7 +194,7 @@ When the server has authentication enabled, a session must complete the `auth_in
 
 - Query results are fully buffered in memory before being sent, so very large result sets are subject to the 64 MiB message limit.
 - Authentication protects the credentials, but the connection itself is not encrypted: queries and results travel in cleartext. Run it on a trusted network or behind a tunnel.
-- Authorization is all-or-nothing: any authenticated user may access every configured database.
+- Access control is per database, not per table or per statement: an account that may reach a database may read and write all of it. Use `params: mode=ro` to serve a database read-only to everyone.
 - Named query parameters and custom transaction isolation levels are not supported.
 
 ## Development

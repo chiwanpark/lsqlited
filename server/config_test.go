@@ -220,6 +220,36 @@ auth:
 databases:
   app: {path: /tmp/app.sqlite3}
 `,
+		"grant for unknown database": `
+listen: {port: 7890}
+auth:
+  users:
+    alice:
+      password: s3cret
+      databases: [app, typo]
+databases:
+  app: {path: /tmp/app.sqlite3}
+`,
+		"duplicate grant": `
+listen: {port: 7890}
+auth:
+  users:
+    alice:
+      password: s3cret
+      databases: [app, app]
+databases:
+  app: {path: /tmp/app.sqlite3}
+`,
+		"grants of wrong type": `
+listen: {port: 7890}
+auth:
+  users:
+    alice:
+      password: s3cret
+      databases: app
+databases:
+  app: {path: /tmp/app.sqlite3}
+`,
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -269,16 +299,16 @@ databases:
 		t.Errorf("auth.iterations = %d, want 2000", cfg.Auth.Iterations)
 	}
 
-	creds, err := cfg.Auth.Credentials()
+	accounts, err := cfg.Auth.Accounts()
 	if err != nil {
-		t.Fatalf("Credentials: %v", err)
+		t.Fatalf("Accounts: %v", err)
 	}
-	if len(creds) != 2 {
-		t.Fatalf("expected 2 credentials, got %d", len(creds))
+	if len(accounts) != 2 {
+		t.Fatalf("expected 2 accounts, got %d", len(accounts))
 	}
 	// The plaintext password is turned into a verifier using the configured
 	// iteration count and a fresh random salt.
-	alice := creds["alice"]
+	alice := accounts["alice"].Verifier
 	if alice.Iterations != 2000 {
 		t.Errorf("alice iterations = %d, want 2000", alice.Iterations)
 	}
@@ -295,8 +325,79 @@ databases:
 		t.Error("credential derived from a plaintext password does not accept it")
 	}
 	// A precomputed verifier is used verbatim.
-	if creds["bob"].String() != verifier.String() {
-		t.Errorf("bob credential = %s, want %s", creds["bob"], verifier)
+	if got := accounts["bob"].Verifier.String(); got != verifier.String() {
+		t.Errorf("bob credential = %s, want %s", got, verifier)
+	}
+}
+
+// TestLoadConfigGrants covers the three shapes of the per-user database
+// list: omitted, explicit, and explicitly empty.
+func TestLoadConfigGrants(t *testing.T) {
+	path := writeConfig(t, `
+listen: {port: 7890}
+auth:
+  iterations: 1000
+  users:
+    root:
+      password: s3cret
+    alice:
+      password: s3cret
+      databases: [app, metrics]
+    bob:
+      password: s3cret
+      databases: [app]
+    suspended:
+      password: s3cret
+      databases: []
+databases:
+  app: {path: /tmp/app.sqlite3}
+  metrics: {path: /tmp/metrics.sqlite3}
+  archive: {path: /tmp/archive.sqlite3}
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	accounts, err := cfg.Auth.Accounts()
+	if err != nil {
+		t.Fatalf("Accounts: %v", err)
+	}
+
+	cases := []struct {
+		user     string
+		database string
+		want     bool
+	}{
+		// An omitted list means every configured database.
+		{"root", "app", true},
+		{"root", "metrics", true},
+		{"root", "archive", true},
+		// An explicit list means exactly those databases.
+		{"alice", "app", true},
+		{"alice", "metrics", true},
+		{"alice", "archive", false},
+		{"bob", "app", true},
+		{"bob", "metrics", false},
+		{"bob", "archive", false},
+		// An explicitly empty list means none.
+		{"suspended", "app", false},
+		{"suspended", "metrics", false},
+		{"suspended", "archive", false},
+	}
+	for _, tc := range cases {
+		account, ok := accounts[tc.user]
+		if !ok {
+			t.Fatalf("missing account %q", tc.user)
+		}
+		if got := account.CanAccess(tc.database); got != tc.want {
+			t.Errorf("%s CanAccess(%q) = %v, want %v", tc.user, tc.database, got, tc.want)
+		}
+	}
+
+	// A name that is not a configured database is never accessible, even to
+	// an unrestricted account it would be resolved (and rejected) later.
+	if accounts["alice"].CanAccess("nonexistent") {
+		t.Error("a restricted account may access a database outside its grant list")
 	}
 }
 
@@ -310,12 +411,12 @@ databases:
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	creds, err := cfg.Auth.Credentials()
+	accounts, err := cfg.Auth.Accounts()
 	if err != nil {
-		t.Fatalf("Credentials: %v", err)
+		t.Fatalf("Accounts: %v", err)
 	}
-	if creds != nil {
-		t.Errorf("expected no credentials, got %+v", creds)
+	if accounts != nil {
+		t.Errorf("expected no accounts, got %+v", accounts)
 	}
 }
 

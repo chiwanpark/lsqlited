@@ -55,8 +55,186 @@ func startAuthServer(t *testing.T) string {
 }
 
 func authDSN(addr, user, password string) string {
-	return fmt.Sprintf("lsqlited://%s@%s/test",
-		url.UserPassword(user, password).String(), addr)
+	return authDatabaseDSN(addr, user, password, "test")
+}
+
+func authDatabaseDSN(addr, user, password, database string) string {
+	return fmt.Sprintf("lsqlited://%s@%s/%s",
+		url.UserPassword(user, password).String(), addr, database)
+}
+
+// startGrantServer serves three databases and three accounts with different
+// reach: root is unrestricted, alice is limited to two databases, and
+// suspended is granted none.
+func startGrantServer(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	cfg := &server.Config{
+		Listen: server.ListenConfig{Host: "127.0.0.1", Port: 0},
+		Auth: server.AuthConfig{
+			Iterations: testIterations,
+			Users: map[string]server.UserConfig{
+				"root":      {Password: "s3cret"},
+				"alice":     {Password: "s3cret", Databases: []string{"app", "metrics"}},
+				"suspended": {Password: "s3cret", Databases: []string{}},
+			},
+		},
+		Databases: map[string]server.DatabaseConfig{
+			"app":     {Path: filepath.Join(dir, "app.sqlite3")},
+			"metrics": {Path: filepath.Join(dir, "metrics.sqlite3")},
+			"archive": {Path: filepath.Join(dir, "archive.sqlite3")},
+		},
+	}
+	srv := server.New(cfg)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("start server: %v", err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	return srv.Addr().String()
+}
+
+func TestPerDatabaseGrants(t *testing.T) {
+	addr := startGrantServer(t)
+	cases := []struct {
+		user     string
+		database string
+		allowed  bool
+	}{
+		{"root", "app", true},
+		{"root", "metrics", true},
+		{"root", "archive", true},
+		{"alice", "app", true},
+		{"alice", "metrics", true},
+		{"alice", "archive", false},
+		{"suspended", "app", false},
+		{"suspended", "archive", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.user+"/"+tc.database, func(t *testing.T) {
+			db := openDSN(t, authDatabaseDSN(addr, tc.user, "s3cret", tc.database))
+			err := db.Ping()
+			if tc.allowed {
+				if err != nil {
+					t.Fatalf("ping: %v", err)
+				}
+				if _, err := db.Exec("CREATE TABLE IF NOT EXISTS t (v TEXT)"); err != nil {
+					t.Errorf("exec: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected access to be denied")
+			}
+			if !strings.Contains(err.Error(), "is not permitted") {
+				t.Errorf("error = %v, want a permission error", err)
+			}
+		})
+	}
+}
+
+// TestGrantsCoverEveryRequestType checks that authorization is enforced on
+// each request, not only on the first one.
+func TestGrantsCoverEveryRequestType(t *testing.T) {
+	addr := startGrantServer(t)
+	db := openDSN(t, authDatabaseDSN(addr, "alice", "s3cret", "archive"))
+
+	if _, err := db.Query("SELECT 1"); err == nil {
+		t.Error("query: expected access to be denied")
+	}
+	if _, err := db.Exec("CREATE TABLE t (v TEXT)"); err == nil {
+		t.Error("exec: expected access to be denied")
+	}
+	if _, err := db.Begin(); err == nil {
+		t.Error("begin: expected access to be denied")
+	}
+}
+
+// TestGrantsAreNotBoundToTheLoginDatabase checks that a hand-written client
+// cannot authenticate while naming a permitted database and then reach a
+// forbidden one on the same connection.
+func TestGrantsAreNotBoundToTheLoginDatabase(t *testing.T) {
+	addr := startGrantServer(t)
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	// Authenticate as alice while claiming the permitted "app" database.
+	clientNonce, err := auth.Nonce()
+	if err != nil {
+		t.Fatalf("nonce: %v", err)
+	}
+	var resp protocol.Response
+	if err := protocol.WriteMessage(conn, &protocol.Request{
+		Type:     protocol.TypeAuthInit,
+		Database: "app",
+		User:     "alice",
+		Nonce:    base64.StdEncoding.EncodeToString(clientNonce),
+	}); err != nil {
+		t.Fatalf("write auth_init: %v", err)
+	}
+	if err := protocol.ReadMessage(conn, &resp); err != nil {
+		t.Fatalf("read challenge: %v", err)
+	}
+	if resp.Auth == nil {
+		t.Fatalf("no challenge: %+v", resp)
+	}
+	salt, err := base64.StdEncoding.DecodeString(resp.Auth.Salt)
+	if err != nil {
+		t.Fatalf("decode salt: %v", err)
+	}
+	serverNonce, err := base64.StdEncoding.DecodeString(resp.Auth.Nonce)
+	if err != nil {
+		t.Fatalf("decode nonce: %v", err)
+	}
+	salted, err := auth.SaltPassword("s3cret", salt, resp.Auth.Iterations)
+	if err != nil {
+		t.Fatalf("salt password: %v", err)
+	}
+	message := auth.AuthMessage("alice", clientNonce, serverNonce, salt, resp.Auth.Iterations)
+	if err := protocol.WriteMessage(conn, &protocol.Request{
+		Type:     protocol.TypeAuth,
+		Database: "app",
+		Proof:    base64.StdEncoding.EncodeToString(auth.ClientProof(salted, message)),
+	}); err != nil {
+		t.Fatalf("write auth: %v", err)
+	}
+	resp = protocol.Response{}
+	if err := protocol.ReadMessage(conn, &resp); err != nil {
+		t.Fatalf("read auth response: %v", err)
+	}
+	if resp.Error != "" {
+		t.Fatalf("authentication failed: %s", resp.Error)
+	}
+
+	// The permitted database works on this session.
+	if err := protocol.WriteMessage(conn, &protocol.Request{
+		Type: protocol.TypeExec, Database: "app", Query: "CREATE TABLE IF NOT EXISTS t (v TEXT)",
+	}); err != nil {
+		t.Fatalf("write exec: %v", err)
+	}
+	resp = protocol.Response{}
+	if err := protocol.ReadMessage(conn, &resp); err != nil {
+		t.Fatalf("read exec response: %v", err)
+	}
+	if resp.Error != "" {
+		t.Fatalf("exec on a permitted database failed: %s", resp.Error)
+	}
+
+	// Switching to a forbidden database on the same session must not work.
+	if err := protocol.WriteMessage(conn, &protocol.Request{
+		Type: protocol.TypeExec, Database: "archive", Query: "CREATE TABLE t (v TEXT)",
+	}); err != nil {
+		t.Fatalf("write exec: %v", err)
+	}
+	resp = protocol.Response{}
+	if err := protocol.ReadMessage(conn, &resp); err != nil {
+		t.Fatalf("read exec response: %v", err)
+	}
+	if !strings.Contains(resp.Error, "is not permitted") {
+		t.Errorf("exec on a forbidden database = %+v, want a permission error", resp)
+	}
 }
 
 func TestAuthSuccess(t *testing.T) {
