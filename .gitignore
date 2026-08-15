@@ -1,0 +1,12 @@
+# Binaries
+/lsqlited
+/bin/
+
+# Test artifacts
+*.test
+*.out
+
+# Local databases and configs
+*.sqlite3
+*.db
+/lsqlited.yaml

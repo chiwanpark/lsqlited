@@ -1,0 +1,20 @@
+# Example lsqlited configuration.
+
+listen:
+  # Address to bind to. Leave empty to listen on all interfaces.
+  host: 127.0.0.1
+  # TCP port to listen on.
+  port: 7890
+
+# Databases served by this daemon, keyed by logical name. Clients refer to
+# a database by its logical name, e.g. lsqlited://127.0.0.1:7890/app
+databases:
+  app:
+    # Path to the SQLite database file. Created on first write if missing.
+    path: /var/lib/lsqlited/app.sqlite3
+  metrics:
+    path: /var/lib/lsqlited/metrics.sqlite3
+    # Serve this database in read-only mode.
+    read_only: true
+    # SQLite busy timeout in milliseconds (default: 5000).
+    busy_timeout_ms: 10000
