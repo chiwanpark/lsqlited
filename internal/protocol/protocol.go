@@ -24,6 +24,12 @@ const (
 	TypeBegin    = "begin"
 	TypeCommit   = "commit"
 	TypeRollback = "rollback"
+	// TypeAuthInit starts the challenge-response handshake: the client
+	// announces the user name and its nonce, the server answers with an
+	// AuthChallenge.
+	TypeAuthInit = "auth_init"
+	// TypeAuth carries the client proof and completes the handshake.
+	TypeAuth = "auth"
 )
 
 // Request is a message sent from the driver to the server.
@@ -36,6 +42,25 @@ type Request struct {
 	Query string `json:"query,omitempty"`
 	// Args are the positional bind parameters for Query.
 	Args []Value `json:"args,omitempty"`
+	// User is the account name for TypeAuthInit requests.
+	User string `json:"user,omitempty"`
+	// Nonce is the base64-encoded client nonce for TypeAuthInit requests.
+	Nonce string `json:"nonce,omitempty"`
+	// Proof is the base64-encoded client proof for TypeAuth requests. It
+	// demonstrates knowledge of the password without revealing it.
+	Proof string `json:"proof,omitempty"`
+}
+
+// AuthChallenge is the server's answer to a TypeAuthInit request. It tells
+// the client how to derive the salted password and which nonce to bind the
+// proof to.
+type AuthChallenge struct {
+	// Salt is the base64-encoded per-user salt.
+	Salt string `json:"salt"`
+	// Iterations is the PBKDF2 iteration count.
+	Iterations int `json:"iterations"`
+	// Nonce is the base64-encoded server nonce.
+	Nonce string `json:"nonce"`
 }
 
 // Response is a message sent from the server to the driver.
@@ -49,6 +74,12 @@ type Response struct {
 	// LastInsertID and RowsAffected are set for TypeExec requests.
 	LastInsertID int64 `json:"last_insert_id,omitempty"`
 	RowsAffected int64 `json:"rows_affected,omitempty"`
+	// Auth is the challenge returned for TypeAuthInit requests.
+	Auth *AuthChallenge `json:"auth,omitempty"`
+	// Signature is the base64-encoded server signature returned for a
+	// successful TypeAuth request, allowing the client to authenticate the
+	// server in turn.
+	Signature string `json:"signature,omitempty"`
 }
 
 // WriteMessage marshals msg as JSON and writes it as a length-prefixed frame.

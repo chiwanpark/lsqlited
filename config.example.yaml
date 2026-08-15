@@ -14,6 +14,28 @@ params:
   _journal_mode: WAL
   _foreign_keys: true
 
+# Client authentication. Omit the whole section (or leave `users` empty) to
+# accept every connection without authenticating it. Clients then pass their
+# credentials in the DSN: lsqlited://alice:s3cret@127.0.0.1:7890/app
+#
+# The password is never sent over the network: the server issues a random
+# challenge and the client answers with a proof derived from the password.
+auth:
+  # PBKDF2 iteration count used for `password:` entries below and advertised
+  # for unknown users (default: 4096). Clients run the derivation once per
+  # connection, so raising this makes connecting measurably slower.
+  iterations: 4096
+  users:
+    alice:
+      # Recommended: a precomputed verifier, so the password itself never
+      # appears in this file. Generate one with:
+      #   printf '%s' 's3cret' | lsqlited -hash-password
+      verifier: "SCRAM-SHA-256$4096:4X/1OevPJo0nxVmGMhochg==$hUeU8yswZ8nWH3GIkn1BAc5zwfLC7yDoOiDYnYSunAE=:aX9c/LVO0TcYRedgwLyvphjukETWWUwHn0uFJgprzew="
+    bob:
+      # Convenient, but leaves the password readable in this file. Use only
+      # if the file permissions make that acceptable.
+      password: hunter2
+
 # Databases served by this daemon, keyed by logical name. Clients refer to
 # a database by its logical name, e.g. lsqlited://127.0.0.1:7890/app
 databases:

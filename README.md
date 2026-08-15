@@ -7,7 +7,7 @@
 
 ## Requirements
 
-- Go 1.23 or newer (tested against Go 1.23, 1.24, 1.25, and 1.26)
+- Go 1.24 or newer (tested against Go 1.24, 1.25, and 1.26)
 - A C compiler with `CGO_ENABLED=1` to build the server, since it links the SQLite3 C library
 
 ## Installation
@@ -66,12 +66,47 @@ params:
 
 Parameters are appended to the `file:` URI handed to SQLite, so anything the [go-sqlite3 driver](https://pkg.go.dev/github.com/mattn/go-sqlite3#hdr-Connection_String) understands works — `mode`, `immutable`, `cache`, `vfs`, `_journal_mode`, `_foreign_keys`, `_txlock`, and so on.
 
+### Authentication
+
+By default the daemon accepts every connection. Adding an `auth.users` section turns on authentication for all clients:
+
+```yaml
+auth:
+  iterations: 4096   # PBKDF2 cost, optional (default 4096)
+  users:
+    alice:
+      verifier: "SCRAM-SHA-256$4096:4X/1Oev...==$hUeU8ys...=:aX9c/LV...="
+    bob:
+      password: hunter2
+```
+
+Each account is configured with exactly one of:
+
+- `verifier` — a precomputed credential, so the password never appears in the configuration file. **Recommended.** Generate one with `-hash-password`:
+
+  ```sh
+  printf '%s' 'hunter2' | lsqlited -hash-password
+  SCRAM-SHA-256$4096:4X/1Oev...==$hUeU8ys...=:aX9c/LV...=
+  ```
+
+- `password` — a plaintext password, converted to a verifier when the configuration is loaded. Convenient, but readable by anyone who can read the file.
+
+Clients then supply credentials in the DSN:
+
+```go
+db, err := sql.Open("lsqlited", "lsqlited://alice:s3cret@127.0.0.1:7890/app")
+```
+
+Unauthenticated requests to a server with configured users are refused with `authentication required`, and a bad user name or password is refused with a deliberately vague `authentication failed`.
+
 Flags:
 
 | Flag | Default | Description |
 | --- | --- | --- |
 | `-config` | `lsqlited.yaml` | Path to the YAML configuration file |
 | `-log-level` | `info` | Log level: `debug`, `info`, `warn`, `error` |
+| `-hash-password` | `false` | Read a password from stdin, print an `auth.users` verifier, and exit |
+| `-iterations` | `4096` | PBKDF2 iteration count used by `-hash-password` |
 
 ## Using the Driver
 
@@ -110,12 +145,13 @@ func main() {
 The DSN has the form:
 
 ```
-lsqlited://host:port/database[?dial_timeout=10s]
+lsqlited://[user:password@]host:port/database[?dial_timeout=10s]
 ```
 
 - `database` is the logical name configured on the server.
 - `port` defaults to `7890` when omitted.
 - `dial_timeout` sets the TCP connect timeout (default `10s`).
+- `user:password` are required when the server has authentication enabled; percent-encode any reserved characters. Supplying one without the other is an error.
 
 Transactions (`db.Begin` / `db.BeginTx`), prepared statements, and context cancellation are supported. Query parameters are positional (`?`); named parameters are not supported.
 
@@ -136,14 +172,25 @@ Response:
 {"columns": ["v"], "rows": [[{"t": "text", "v": "hello"}]]}
 ```
 
-Request types are `ping`, `query`, `exec`, `begin`, `commit`, and `rollback`. Values are tagged (`null`, `int`, `float`, `bool`, `text`, `blob`, `time`) and transported as strings to preserve full `int64` precision; blobs are base64-encoded and times use RFC 3339.
+Request types are `ping`, `query`, `exec`, `begin`, `commit`, `rollback`, `auth_init`, and `auth`. Values are tagged (`null`, `int`, `float`, `bool`, `text`, `blob`, `time`) and transported as strings to preserve full `int64` precision; blobs are base64-encoded and times use RFC 3339.
 
 Each TCP connection is a session on the server. `begin` pins a dedicated SQLite transaction to the session until `commit` or `rollback`; a dropped connection rolls back any open transaction automatically.
+
+When the server has authentication enabled, a session must complete the `auth_init`/`auth` exchange before any other request type is accepted:
+
+```json
+{"type": "auth_init", "user": "alice", "nonce": "<base64 client nonce>"}
+{"auth": {"salt": "<base64>", "iterations": 4096, "nonce": "<base64 server nonce>"}}
+
+{"type": "auth", "proof": "<base64 client proof>"}
+{"signature": "<base64 server signature>"}
+```
 
 ## Limitations
 
 - Query results are fully buffered in memory before being sent, so very large result sets are subject to the 64 MiB message limit.
-- No authentication or encryption — run it on a trusted network or behind a tunnel.
+- Authentication protects the credentials, but the connection itself is not encrypted: queries and results travel in cleartext. Run it on a trusted network or behind a tunnel.
+- Authorization is all-or-nothing: any authenticated user may access every configured database.
 - Named query parameters and custom transaction isolation levels are not supported.
 
 ## Development
@@ -156,7 +203,7 @@ go test -race ./...
 CI runs the full suite against every supported Go version on each push to `main`. To reproduce a specific version locally without installing it system-wide:
 
 ```sh
-GOTOOLCHAIN=go1.23.0 go test ./...
+GOTOOLCHAIN=go1.24.0 go test ./...
 ```
 
 ## License

@@ -5,6 +5,7 @@ package server
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/chiwanpark/lsqlited/internal/auth"
 	"github.com/chiwanpark/lsqlited/internal/protocol"
 	_ "github.com/mattn/go-sqlite3" // CGO-based SQLite driver, registered as "sqlite3"
 )
@@ -28,10 +30,19 @@ func WithLogger(logger *slog.Logger) Option {
 	return func(s *Server) { s.logger = logger }
 }
 
+// errAuthFailed is deliberately vague: telling the client whether the user
+// name or the password was wrong would let it enumerate accounts.
+var errAuthFailed = errors.New("authentication failed")
+
 // Server serves SQLite databases over TCP.
 type Server struct {
 	cfg    *Config
 	logger *slog.Logger
+
+	// users and authSecret are written once by Start, before any connection
+	// is accepted, and only read afterwards.
+	users      map[string]*auth.Verifier
+	authSecret []byte
 
 	mu     sync.Mutex
 	ln     net.Listener
@@ -67,6 +78,9 @@ func (s *Server) Start() error {
 	if s.ln != nil {
 		return errors.New("server: already started")
 	}
+	if err := s.initAuth(); err != nil {
+		return err
+	}
 	addr := net.JoinHostPort(s.cfg.Listen.Host, strconv.Itoa(s.cfg.Listen.Port))
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -76,6 +90,35 @@ func (s *Server) Start() error {
 	s.wg.Add(1)
 	go s.acceptLoop(ln)
 	return nil
+}
+
+// initAuth derives the credentials of every configured account and the
+// per-process secret used to fabricate challenges for unknown users.
+func (s *Server) initAuth() error {
+	users, err := s.cfg.Auth.Credentials()
+	if err != nil {
+		return fmt.Errorf("server: %w", err)
+	}
+	secret, err := auth.Secret()
+	if err != nil {
+		return fmt.Errorf("server: %w", err)
+	}
+	s.users = users
+	s.authSecret = secret
+	return nil
+}
+
+// authEnabled reports whether clients must authenticate before issuing any
+// other request.
+func (s *Server) authEnabled() bool { return len(s.users) > 0 }
+
+// verifier returns the credential of user. Unknown users get a stable decoy
+// so that the challenge does not reveal whether the account exists.
+func (s *Server) verifier(user string) (*auth.Verifier, bool) {
+	if v, ok := s.users[user]; ok {
+		return v, true
+	}
+	return auth.DecoyVerifier(s.authSecret, user, s.cfg.Auth.iterations()), false
 }
 
 // Addr returns the address the server is listening on, or nil if the server
@@ -163,7 +206,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	logger.Debug("connection opened")
 	defer logger.Debug("connection closed")
 
-	sess := &session{srv: s}
+	sess := &session{srv: s, logger: logger}
 	defer sess.cleanup()
 
 	ctx := context.Background()
@@ -239,11 +282,27 @@ type queryer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
-// session holds per-connection state, most importantly an in-progress
-// transaction, if any.
+// session holds per-connection state, most importantly the authenticated
+// user and an in-progress transaction, if any.
 type session struct {
-	srv *Server
-	tx  *sql.Tx
+	srv    *Server
+	logger *slog.Logger
+	tx     *sql.Tx
+
+	// user is the authenticated account name, empty until the handshake
+	// completes.
+	user string
+	// pending holds the state of a handshake between auth_init and auth.
+	pending *pendingAuth
+}
+
+// pendingAuth is the challenge a session has issued and is waiting on.
+type pendingAuth struct {
+	user        string
+	verifier    *auth.Verifier
+	authMessage string
+	// known is false when the challenge was fabricated for an unknown user.
+	known bool
 }
 
 func (sess *session) cleanup() {
@@ -254,6 +313,15 @@ func (sess *session) cleanup() {
 }
 
 func (sess *session) handle(ctx context.Context, req *protocol.Request) *protocol.Response {
+	switch req.Type {
+	case protocol.TypeAuthInit:
+		return sess.handleAuthInit(req)
+	case protocol.TypeAuth:
+		return sess.handleAuth(req)
+	}
+	if sess.srv.authEnabled() && sess.user == "" {
+		return errResponse(errors.New("authentication required"))
+	}
 	switch req.Type {
 	case protocol.TypePing:
 		return sess.handlePing(ctx, req)
@@ -267,6 +335,69 @@ func (sess *session) handle(ctx context.Context, req *protocol.Request) *protoco
 		return sess.handleStatement(ctx, req)
 	default:
 		return errResponse(fmt.Errorf("unknown request type %q", req.Type))
+	}
+}
+
+// handleAuthInit answers the first handshake message with a challenge. The
+// reply is shaped identically for known and unknown accounts.
+func (sess *session) handleAuthInit(req *protocol.Request) *protocol.Response {
+	if !sess.srv.authEnabled() {
+		return errResponse(errors.New("authentication is not enabled on this server"))
+	}
+	if sess.user != "" {
+		return errResponse(errors.New("already authenticated"))
+	}
+	if req.User == "" {
+		return errResponse(errors.New("missing user name"))
+	}
+	clientNonce, err := base64.StdEncoding.DecodeString(req.Nonce)
+	if err != nil || len(clientNonce) < auth.MinNonceLen {
+		return errResponse(errors.New("invalid client nonce"))
+	}
+	serverNonce, err := auth.Nonce()
+	if err != nil {
+		return errResponse(err)
+	}
+	verifier, known := sess.srv.verifier(req.User)
+	sess.pending = &pendingAuth{
+		user:     req.User,
+		verifier: verifier,
+		known:    known,
+		authMessage: auth.AuthMessage(req.User, clientNonce, serverNonce,
+			verifier.Salt, verifier.Iterations),
+	}
+	return &protocol.Response{Auth: &protocol.AuthChallenge{
+		Salt:       base64.StdEncoding.EncodeToString(verifier.Salt),
+		Iterations: verifier.Iterations,
+		Nonce:      base64.StdEncoding.EncodeToString(serverNonce),
+	}}
+}
+
+// handleAuth checks the client proof and, on success, returns the server
+// signature so the client can authenticate the server in turn.
+func (sess *session) handleAuth(req *protocol.Request) *protocol.Response {
+	if sess.user != "" {
+		return errResponse(errors.New("already authenticated"))
+	}
+	pending := sess.pending
+	// A challenge is single use: a failed attempt must start over, which
+	// forces a fresh nonce and rules out offline proof grinding.
+	sess.pending = nil
+	if pending == nil {
+		return errResponse(errors.New("authentication has not been initiated"))
+	}
+	proof, err := base64.StdEncoding.DecodeString(req.Proof)
+	// Always verify, even for unknown users, so that failures cost the same.
+	valid := err == nil && pending.verifier.Verify(pending.authMessage, proof)
+	if !pending.known || !valid {
+		sess.logger.Warn("authentication failed", "user", pending.user)
+		return errResponse(errAuthFailed)
+	}
+	sess.user = pending.user
+	sess.logger.Debug("authenticated", "user", sess.user)
+	return &protocol.Response{
+		Signature: base64.StdEncoding.EncodeToString(
+			pending.verifier.ServerSignature(pending.authMessage)),
 	}
 }
 

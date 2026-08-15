@@ -13,15 +13,20 @@
 //
 // The DSN has the form:
 //
-//	lsqlited://host:port/database[?dial_timeout=10s]
+//	lsqlited://[user:password@]host:port/database[?dial_timeout=10s]
 //
-// where database is the logical database name configured on the server.
+// where database is the logical database name configured on the server. When
+// credentials are present the driver performs a challenge-response handshake
+// on every new connection; the password itself is never transmitted.
 package lsqlited
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -31,6 +36,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chiwanpark/lsqlited/internal/auth"
 	"github.com/chiwanpark/lsqlited/internal/protocol"
 )
 
@@ -77,6 +83,8 @@ type dsnConfig struct {
 	addr        string
 	database    string
 	dialTimeout time.Duration
+	username    string
+	password    string
 }
 
 func parseDSN(dsn string) (*dsnConfig, error) {
@@ -104,6 +112,17 @@ func parseDSN(dsn string) (*dsnConfig, error) {
 		database:    database,
 		dialTimeout: defaultDialTimeout,
 	}
+	if u.User != nil {
+		cfg.username = u.User.Username()
+		if cfg.username == "" {
+			return nil, fmt.Errorf("lsqlited: invalid DSN %q: missing user name", dsn)
+		}
+		password, ok := u.User.Password()
+		if !ok {
+			return nil, fmt.Errorf("lsqlited: invalid DSN %q: missing password", dsn)
+		}
+		cfg.password = password
+	}
 	q := u.Query()
 	if v := q.Get("dial_timeout"); v != "" {
 		timeout, err := time.ParseDuration(v)
@@ -118,6 +137,14 @@ func parseDSN(dsn string) (*dsnConfig, error) {
 type connector struct {
 	driver *Driver
 	cfg    *dsnConfig
+
+	// mu guards the memoized salted password. Deriving it costs a PBKDF2
+	// run, so connections that see the same salt and iteration count reuse
+	// the result instead of paying for it again.
+	mu         sync.Mutex
+	salt       []byte
+	iterations int
+	salted     []byte
 }
 
 var _ driver.Connector = (*connector)(nil)
@@ -128,10 +155,85 @@ func (c *connector) Connect(ctx context.Context) (driver.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("lsqlited: dial %s: %w", c.cfg.addr, err)
 	}
-	return &conn{nc: nc, database: c.cfg.database}, nil
+	cn := &conn{nc: nc, database: c.cfg.database}
+	if c.cfg.username != "" {
+		if err := c.authenticate(ctx, cn); err != nil {
+			cn.Close()
+			return nil, err
+		}
+	}
+	return cn, nil
 }
 
 func (c *connector) Driver() driver.Driver { return c.driver }
+
+// authenticate runs the challenge-response handshake. The password is used
+// only to derive a proof bound to both peers' nonces, so an observer learns
+// nothing reusable, and the server's reply is checked so that a rogue server
+// cannot impersonate the real one.
+func (c *connector) authenticate(ctx context.Context, cn *conn) error {
+	clientNonce, err := auth.Nonce()
+	if err != nil {
+		return fmt.Errorf("lsqlited: %w", err)
+	}
+	resp, err := cn.roundTrip(ctx, &protocol.Request{
+		Type:  protocol.TypeAuthInit,
+		User:  c.cfg.username,
+		Nonce: base64.StdEncoding.EncodeToString(clientNonce),
+	})
+	if err != nil {
+		return err
+	}
+	if resp.Auth == nil {
+		return errors.New("lsqlited: server did not send an authentication challenge")
+	}
+	salt, err := base64.StdEncoding.DecodeString(resp.Auth.Salt)
+	if err != nil || len(salt) == 0 {
+		return errors.New("lsqlited: invalid authentication challenge: bad salt")
+	}
+	serverNonce, err := base64.StdEncoding.DecodeString(resp.Auth.Nonce)
+	if err != nil || len(serverNonce) < auth.MinNonceLen {
+		return errors.New("lsqlited: invalid authentication challenge: bad nonce")
+	}
+	iterations := resp.Auth.Iterations
+	if iterations < auth.MinIterations || iterations > auth.MaxIterations {
+		return fmt.Errorf("lsqlited: invalid authentication challenge: iteration count %d out of range [%d, %d]",
+			iterations, auth.MinIterations, auth.MaxIterations)
+	}
+
+	salted, err := c.saltedPassword(salt, iterations)
+	if err != nil {
+		return err
+	}
+	message := auth.AuthMessage(c.cfg.username, clientNonce, serverNonce, salt, iterations)
+	final, err := cn.roundTrip(ctx, &protocol.Request{
+		Type:  protocol.TypeAuth,
+		Proof: base64.StdEncoding.EncodeToString(auth.ClientProof(salted, message)),
+	})
+	if err != nil {
+		return err
+	}
+	signature, err := base64.StdEncoding.DecodeString(final.Signature)
+	if err != nil || !hmac.Equal(signature, auth.ServerSignature(salted, message)) {
+		return errors.New("lsqlited: server signature mismatch, refusing to trust the server")
+	}
+	return nil
+}
+
+// saltedPassword derives (and memoizes) PBKDF2(password, salt, iterations).
+func (c *connector) saltedPassword(salt []byte, iterations int) ([]byte, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.salted != nil && c.iterations == iterations && bytes.Equal(c.salt, salt) {
+		return c.salted, nil
+	}
+	salted, err := auth.SaltPassword(c.cfg.password, salt, iterations)
+	if err != nil {
+		return nil, fmt.Errorf("lsqlited: %w", err)
+	}
+	c.salt, c.iterations, c.salted = salt, iterations, salted
+	return salted, nil
+}
 
 // conn is a single client connection. database/sql guarantees that a conn is
 // used by at most one goroutine at a time, but the mutex additionally guards

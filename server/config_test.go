@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/chiwanpark/lsqlited/internal/auth"
 )
 
 func writeConfig(t *testing.T, content string) string {
@@ -168,6 +170,56 @@ databases:
     params:
       "": ro
 `,
+		"user without credentials": `
+listen: {port: 7890}
+auth:
+  users:
+    alice: {}
+databases:
+  app: {path: /tmp/app.sqlite3}
+`,
+		"user with both credentials": `
+listen: {port: 7890}
+auth:
+  users:
+    alice:
+      password: s3cret
+      verifier: "SCRAM-SHA-256$4096:c2FsdA==$a$b"
+databases:
+  app: {path: /tmp/app.sqlite3}
+`,
+		"malformed verifier": `
+listen: {port: 7890}
+auth:
+  users:
+    alice: {verifier: "not-a-verifier"}
+databases:
+  app: {path: /tmp/app.sqlite3}
+`,
+		"empty user name": `
+listen: {port: 7890}
+auth:
+  users:
+    "": {password: s3cret}
+databases:
+  app: {path: /tmp/app.sqlite3}
+`,
+		"iterations out of range": `
+listen: {port: 7890}
+auth:
+  iterations: 10
+  users:
+    alice: {password: s3cret}
+databases:
+  app: {path: /tmp/app.sqlite3}
+`,
+		"unknown auth field": `
+listen: {port: 7890}
+auth:
+  bogus: true
+databases:
+  app: {path: /tmp/app.sqlite3}
+`,
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -189,6 +241,81 @@ func TestParamsMerge(t *testing.T) {
 	}
 	if merged := Params(nil).merge(nil); merged != nil {
 		t.Errorf("expected nil params, got %+v", merged)
+	}
+}
+
+func TestLoadConfigAuth(t *testing.T) {
+	verifier, err := auth.NewVerifier("from-verifier", auth.MinIterations)
+	if err != nil {
+		t.Fatalf("new verifier: %v", err)
+	}
+	path := writeConfig(t, `
+listen: {port: 7890}
+auth:
+  iterations: 2000
+  users:
+    alice:
+      password: s3cret
+    bob:
+      verifier: "`+verifier.String()+`"
+databases:
+  app: {path: /tmp/app.sqlite3}
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Auth.Iterations != 2000 {
+		t.Errorf("auth.iterations = %d, want 2000", cfg.Auth.Iterations)
+	}
+
+	creds, err := cfg.Auth.Credentials()
+	if err != nil {
+		t.Fatalf("Credentials: %v", err)
+	}
+	if len(creds) != 2 {
+		t.Fatalf("expected 2 credentials, got %d", len(creds))
+	}
+	// The plaintext password is turned into a verifier using the configured
+	// iteration count and a fresh random salt.
+	alice := creds["alice"]
+	if alice.Iterations != 2000 {
+		t.Errorf("alice iterations = %d, want 2000", alice.Iterations)
+	}
+	if len(alice.Salt) != auth.SaltLen {
+		t.Errorf("alice salt length = %d, want %d", len(alice.Salt), auth.SaltLen)
+	}
+	msg := auth.AuthMessage("alice", make([]byte, auth.NonceLen), make([]byte, auth.NonceLen),
+		alice.Salt, alice.Iterations)
+	salted, err := auth.SaltPassword("s3cret", alice.Salt, alice.Iterations)
+	if err != nil {
+		t.Fatalf("salt password: %v", err)
+	}
+	if !alice.Verify(msg, auth.ClientProof(salted, msg)) {
+		t.Error("credential derived from a plaintext password does not accept it")
+	}
+	// A precomputed verifier is used verbatim.
+	if creds["bob"].String() != verifier.String() {
+		t.Errorf("bob credential = %s, want %s", creds["bob"], verifier)
+	}
+}
+
+func TestLoadConfigWithoutAuth(t *testing.T) {
+	path := writeConfig(t, `
+listen: {port: 7890}
+databases:
+  app: {path: /tmp/app.sqlite3}
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	creds, err := cfg.Auth.Credentials()
+	if err != nil {
+		t.Fatalf("Credentials: %v", err)
+	}
+	if creds != nil {
+		t.Errorf("expected no credentials, got %+v", creds)
 	}
 }
 

@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/chiwanpark/lsqlited/internal/auth"
 )
 
 // Config is the top-level server configuration, usually loaded from a YAML
@@ -18,6 +20,10 @@ import (
 //	  host: 127.0.0.1
 //	  port: 7890
 //	params: _journal_mode=WAL
+//	auth:
+//	  users:
+//	    alice:
+//	      verifier: "SCRAM-SHA-256$4096:..."
 //	databases:
 //	  app:
 //	    path: /var/lib/lsqlited/app.sqlite3
@@ -28,8 +34,114 @@ type Config struct {
 	Listen ListenConfig `yaml:"listen"`
 	// Params are SQLite DSN query parameters applied to every database.
 	// Per-database params take precedence over them.
-	Params    Params                    `yaml:"params"`
+	Params Params `yaml:"params"`
+	// Auth configures client authentication. When no users are listed the
+	// server accepts every connection without authenticating it.
+	Auth      AuthConfig                `yaml:"auth"`
 	Databases map[string]DatabaseConfig `yaml:"databases"`
+}
+
+// AuthConfig configures challenge-response authentication.
+type AuthConfig struct {
+	// Iterations is the PBKDF2 iteration count used when deriving a
+	// verifier from a plaintext password, and the one advertised for
+	// unknown users. Zero selects auth.DefaultIterations. Raising it makes
+	// offline guessing more expensive but slows down every new client
+	// connection, since clients derive the salted password on connect.
+	Iterations int `yaml:"iterations"`
+	// Users maps account names to their credentials.
+	Users map[string]UserConfig `yaml:"users"`
+}
+
+// UserConfig holds the credentials of a single account. Exactly one of
+// Verifier and Password must be set.
+type UserConfig struct {
+	// Verifier is a precomputed credential in the form
+	// "SCRAM-SHA-256$<iterations>:<salt>$<storedKey>:<serverKey>", as
+	// produced by "lsqlited -hash-password". This is the recommended form:
+	// the configuration file never contains the password itself.
+	Verifier string `yaml:"verifier"`
+	// Password is a plaintext password, converted to a verifier when the
+	// configuration is loaded. Convenient, but it leaves the password
+	// readable in the configuration file.
+	Password string `yaml:"password"`
+}
+
+// validate checks the credential without running the key derivation.
+func (u UserConfig) validate() error {
+	switch {
+	case u.Verifier != "" && u.Password != "":
+		return fmt.Errorf("set either verifier or password, not both")
+	case u.Verifier != "":
+		_, err := auth.ParseVerifier(u.Verifier)
+		return err
+	case u.Password != "":
+		return nil
+	default:
+		return fmt.Errorf("either verifier or password must be set")
+	}
+}
+
+// verifier derives the runtime credential for the account.
+func (u UserConfig) verifier(iterations int) (*auth.Verifier, error) {
+	if err := u.validate(); err != nil {
+		return nil, err
+	}
+	if u.Verifier != "" {
+		return auth.ParseVerifier(u.Verifier)
+	}
+	return auth.NewVerifier(u.Password, iterations)
+}
+
+// Credentials derives the verifier of every configured account. It returns
+// nil when authentication is disabled.
+func (a AuthConfig) Credentials() (map[string]*auth.Verifier, error) {
+	if len(a.Users) == 0 {
+		return nil, nil
+	}
+	creds := make(map[string]*auth.Verifier, len(a.Users))
+	for name, user := range a.Users {
+		v, err := user.verifier(a.iterations())
+		if err != nil {
+			return nil, fmt.Errorf("auth.users.%s: %w", name, err)
+		}
+		creds[name] = v
+	}
+	return creds, nil
+}
+
+// iterations returns the configured PBKDF2 iteration count, or the default.
+func (a AuthConfig) iterations() int {
+	if a.Iterations <= 0 {
+		return auth.DefaultIterations
+	}
+	return a.Iterations
+}
+
+// validate checks the authentication section.
+func (a AuthConfig) validate() error {
+	if a.Iterations != 0 && (a.Iterations < auth.MinIterations || a.Iterations > auth.MaxIterations) {
+		return fmt.Errorf("auth.iterations must be between %d and %d, got %d",
+			auth.MinIterations, auth.MaxIterations, a.Iterations)
+	}
+	for _, name := range sortedKeys(a.Users) {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("auth.users: user name must not be empty")
+		}
+		if err := a.Users[name].validate(); err != nil {
+			return fmt.Errorf("auth.users.%s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // ListenConfig configures the TCP listener.
@@ -170,6 +282,9 @@ func (c *Config) Validate() error {
 	}
 	if err := c.Params.validate(); err != nil {
 		return fmt.Errorf("params: %w", err)
+	}
+	if err := c.Auth.validate(); err != nil {
+		return err
 	}
 	if len(c.Databases) == 0 {
 		return fmt.Errorf("at least one database must be configured")

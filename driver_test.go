@@ -35,7 +35,12 @@ func startServer(t *testing.T) string {
 
 func openDB(t *testing.T, addr, database string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("lsqlited", fmt.Sprintf("lsqlited://%s/%s", addr, database))
+	return openDSN(t, fmt.Sprintf("lsqlited://%s/%s", addr, database))
+}
+
+func openDSN(t *testing.T, dsn string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("lsqlited", dsn)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -297,6 +302,8 @@ func TestInvalidDSN(t *testing.T) {
 		"lsqlited://127.0.0.1:7890",        // missing database
 		"http://127.0.0.1:7890/test",       // wrong scheme
 		"lsqlited://h:1/db?dial_timeout=x", // bad timeout
+		"lsqlited://alice@h:1/db",          // user without password
+		"lsqlited://:pass@h:1/db",          // password without user
 	}
 	for _, dsn := range cases {
 		db, err := sql.Open("lsqlited", dsn)
