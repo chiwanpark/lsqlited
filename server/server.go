@@ -199,7 +199,7 @@ func (s *Server) getDB(name string) (*sql.DB, error) {
 	if !ok {
 		return nil, fmt.Errorf("unknown database %q", name)
 	}
-	db, err := openSQLite(cfg)
+	db, err := openSQLite(cfg, s.cfg.Params)
 	if err != nil {
 		return nil, fmt.Errorf("open database %q: %w", name, err)
 	}
@@ -207,18 +207,22 @@ func (s *Server) getDB(name string) (*sql.DB, error) {
 	return db, nil
 }
 
-func openSQLite(cfg DatabaseConfig) (*sql.DB, error) {
-	busyTimeout := cfg.BusyTimeoutMS
-	if busyTimeout == 0 {
-		busyTimeout = defaultBusyTimeoutMS
-	}
+// sqliteDSN builds the "file:" URI used to open a database. Parameters are
+// applied in increasing order of precedence: built-in defaults, server-wide
+// params, then the database's own params.
+func sqliteDSN(cfg DatabaseConfig, global Params) string {
+	defaults := Params{"_busy_timeout": strconv.Itoa(defaultBusyTimeoutMS)}
+	params := defaults.merge(global).merge(cfg.Params)
+
 	q := url.Values{}
-	q.Set("_busy_timeout", strconv.Itoa(busyTimeout))
-	if cfg.ReadOnly {
-		q.Set("mode", "ro")
+	for key, val := range params {
+		q.Set(key, val)
 	}
-	dsn := "file:" + cfg.Path + "?" + q.Encode()
-	db, err := sql.Open("sqlite3", dsn)
+	return "file:" + cfg.Path + "?" + q.Encode()
+}
+
+func openSQLite(cfg DatabaseConfig, global Params) (*sql.DB, error) {
+	db, err := sql.Open("sqlite3", sqliteDSN(cfg, global))
 	if err != nil {
 		return nil, err
 	}

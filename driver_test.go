@@ -22,7 +22,7 @@ func startServer(t *testing.T) string {
 		Listen: server.ListenConfig{Host: "127.0.0.1", Port: 0},
 		Databases: map[string]server.DatabaseConfig{
 			"test":   {Path: dbPath},
-			"testro": {Path: dbPath, ReadOnly: true},
+			"testro": {Path: dbPath, Params: server.Params{"mode": "ro"}},
 		},
 	}
 	srv := server.New(cfg)

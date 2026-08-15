@@ -25,13 +25,22 @@ listen:
   host: 127.0.0.1   # empty host binds to all interfaces
   port: 7890
 
+params: _journal_mode=WAL # SQLite open parameters for every database
+
 databases:
   app:
     path: /var/lib/lsqlited/app.sqlite3
   metrics:
     path: /var/lib/lsqlited/metrics.sqlite3
-    read_only: true        # reject writes for this database
-    busy_timeout_ms: 10000 # SQLite busy timeout (default: 5000)
+    params: _busy_timeout=10000 # busy timeout in ms (default: 5000)
+  archive:
+    path: /var/lib/lsqlited/archive.sqlite3
+    params: mode=ro&immutable=true # read-only, never written to
+  cached:
+    path: /var/lib/lsqlited/cached.sqlite3
+    params:                # the mapping form works too
+      cache: shared
+      _synchronous: NORMAL
 ```
 
 Then start the daemon:
@@ -41,6 +50,21 @@ lsqlited -config /etc/lsqlited/config.yaml
 ```
 
 Each entry under `databases` maps a logical database name to a SQLite file. Database files are opened lazily on first use and shared across client connections. The daemon shuts down gracefully on `SIGINT`/`SIGTERM`.
+
+### Open Parameters
+
+SQLite open parameters can be set server-wide with the top-level `params` key and per database with `databases.<name>.params`. Both accept either a query string or a mapping:
+
+```yaml
+params: _journal_mode=WAL&_foreign_keys=true
+
+# equivalent
+params:
+  _journal_mode: WAL
+  _foreign_keys: true
+```
+
+Parameters are appended to the `file:` URI handed to SQLite, so anything the [go-sqlite3 driver](https://pkg.go.dev/github.com/mattn/go-sqlite3#hdr-Connection_String) understands works — `mode`, `immutable`, `cache`, `vfs`, `_journal_mode`, `_foreign_keys`, `_txlock`, and so on.
 
 Flags:
 

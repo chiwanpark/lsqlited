@@ -6,6 +6,14 @@ listen:
   # TCP port to listen on.
   port: 7890
 
+# SQLite open parameters applied to every database below. Accepts a query
+# string (params: _journal_mode=WAL&cache=shared) or a mapping. Parameters set
+# on an individual database take precedence over these.
+# _busy_timeout defaults to 5000 unless overridden here or per database.
+params:
+  _journal_mode: WAL
+  _foreign_keys: true
+
 # Databases served by this daemon, keyed by logical name. Clients refer to
 # a database by its logical name, e.g. lsqlited://127.0.0.1:7890/app
 databases:
@@ -14,7 +22,16 @@ databases:
     path: /var/lib/lsqlited/app.sqlite3
   metrics:
     path: /var/lib/lsqlited/metrics.sqlite3
-    # Serve this database in read-only mode.
-    read_only: true
     # SQLite busy timeout in milliseconds (default: 5000).
-    busy_timeout_ms: 10000
+    params: _busy_timeout=10000
+  archive:
+    path: /var/lib/lsqlited/archive.sqlite3
+    # Extra SQLite DSN parameters appended to the file: URI used to open this
+    # database. Use mode=ro to serve a database read-only.
+    params: mode=ro&immutable=true
+  cached:
+    path: /var/lib/lsqlited/cached.sqlite3
+    # The mapping form works too.
+    params:
+      cache: shared
+      _synchronous: NORMAL
