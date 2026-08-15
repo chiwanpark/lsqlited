@@ -1,0 +1,53 @@
+name: Test
+
+on:
+  push:
+    branches:
+    - main
+
+env:
+  CGO_ENABLED: "1"
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check out repository
+      uses: actions/checkout@v6
+
+    - name: Set up Go
+      uses: actions/setup-go@v7
+      with:
+        go-version-file: go.mod
+        cache: true
+
+    - name: Check formatting
+      run: |
+        unformatted="$(gofmt -l .)"
+        if [ -n "$unformatted" ]; then
+          echo "The following files are not gofmt-formatted:"
+          echo "$unformatted"
+          exit 1
+        fi
+
+    - name: Check dependencies are tidy
+      run: |
+        go mod tidy
+        if ! git diff --quiet -- go.mod go.sum; then
+          echo "go.mod or go.sum is not tidy; run 'go mod tidy' and commit the result."
+          git diff -- go.mod go.sum
+          exit 1
+        fi
+
+    - name: Vet
+      run: go vet ./...
+
+    - name: Build
+      run: go build ./...
+
+    - name: Run tests
+      run: go test -v ./...
+
+    - name: Run tests with race detector
+      run: go test -race ./...
