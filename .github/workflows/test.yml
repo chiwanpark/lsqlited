@@ -10,7 +10,40 @@ env:
 
 jobs:
   test:
-    name: Test
+    name: Test (Go ${{ matrix.go-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version:
+        - "1.23"
+        - "1.24"
+        - "1.25"
+        - "1.26"
+    steps:
+    - name: Check out repository
+      uses: actions/checkout@v6
+
+    - name: Set up Go ${{ matrix.go-version }}
+      uses: actions/setup-go@v7
+      with:
+        go-version: ${{ matrix.go-version }}
+        cache: true
+
+    - name: Build
+      run: go build ./...
+
+    - name: Vet
+      run: go vet ./...
+
+    - name: Run tests
+      run: go test -v ./...
+
+    - name: Run tests with race detector
+      run: go test -race ./...
+
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     steps:
     - name: Check out repository
@@ -19,7 +52,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v7
       with:
-        go-version-file: go.mod
+        go-version: "1.26"
         cache: true
 
     - name: Check formatting
@@ -39,15 +72,3 @@ jobs:
           git diff -- go.mod go.sum
           exit 1
         fi
-
-    - name: Vet
-      run: go vet ./...
-
-    - name: Build
-      run: go build ./...
-
-    - name: Run tests
-      run: go test -v ./...
-
-    - name: Run tests with race detector
-      run: go test -race ./...

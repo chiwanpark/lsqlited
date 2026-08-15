@@ -5,6 +5,11 @@
 1. **Server** (`cmd/lsqlited`) — a daemon configured by a YAML file that listens on a TCP port and executes queries against configured SQLite database files.
 2. **Driver** (`github.com/chiwanpark/lsqlited`) — a pure-Go `database/sql` driver that talks to the server, so clients use the standard Go database API.
 
+## Requirements
+
+- Go 1.23 or newer (tested against Go 1.23, 1.24, 1.25, and 1.26)
+- A C compiler with `CGO_ENABLED=1` to build the server, since it links the SQLite3 C library
+
 ## Installation
 
 ```sh
@@ -122,6 +127,12 @@ Each TCP connection is a session on the server. `begin` pins a dedicated SQLite 
 ```sh
 go test ./...        # unit and end-to-end tests
 go test -race ./...
+```
+
+CI runs the full suite against every supported Go version on each push to `main`. To reproduce a specific version locally without installing it system-wide:
+
+```sh
+GOTOOLCHAIN=go1.23.0 go test ./...
 ```
 
 ## License
