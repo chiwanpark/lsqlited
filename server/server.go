@@ -20,14 +20,15 @@ import (
 
 	"github.com/chiwanpark/lsqlited/internal/auth"
 	"github.com/chiwanpark/lsqlited/internal/protocol"
+	"github.com/chiwanpark/lsqlited/internal/version"
 	sqlite3 "github.com/mattn/go-sqlite3" // CGO-based SQLite driver, registered as "sqlite3"
 )
 
 const defaultBusyTimeoutMS = 5000
 
-// baseDriverName is the driver registered by go-sqlite3 itself, used for
-// databases that load no extension.
-const baseDriverName = "sqlite3"
+// baseDriverName is used for databases that load no extension. It is stock
+// SQLite plus the lsqlited_version() function, which every database gets.
+const baseDriverName = version.DriverName
 
 // tlsHandshakeTimeout bounds how long a client may take to complete the TLS
 // handshake, so that a peer that connects and then goes quiet cannot pin a
@@ -407,8 +408,9 @@ func sqliteDriver(exts Extensions) string {
 	return name
 }
 
-// extensionHook returns a connect hook loading every extension that names an
-// entry point, or nil when none does.
+// extensionHook returns a connect hook that registers lsqlited_version() and
+// loads every extension that names an entry point. Extensions without one
+// are handed to the driver instead, which lets SQLite derive the symbol.
 func extensionHook(exts Extensions) func(*sqlite3.SQLiteConn) error {
 	var named Extensions
 	for _, ext := range exts {
@@ -416,10 +418,10 @@ func extensionHook(exts Extensions) func(*sqlite3.SQLiteConn) error {
 			named = append(named, ext)
 		}
 	}
-	if len(named) == 0 {
-		return nil
-	}
 	return func(conn *sqlite3.SQLiteConn) error {
+		if err := version.Register(conn); err != nil {
+			return err
+		}
 		for _, ext := range named {
 			if err := conn.LoadExtension(ext.Path, ext.Entrypoint); err != nil {
 				return fmt.Errorf("load extension %s: %w", ext, err)

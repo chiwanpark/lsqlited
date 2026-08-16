@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/chiwanpark/lsqlited/internal/auth"
+	"github.com/chiwanpark/lsqlited/internal/version"
 	"github.com/chiwanpark/lsqlited/server"
 )
 
@@ -24,7 +25,21 @@ func main() {
 		"read a password from stdin, print an auth.users verifier, and exit")
 	iterations := flag.Int("iterations", auth.DefaultIterations,
 		"PBKDF2 iteration count used by -hash-password")
+	showVersion := flag.Bool("version", false, "print the server version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		// Asking SQLite rather than reading a variable: clients read the
+		// version with `SELECT lsqlited_version()`, and this prints whatever
+		// that function would answer.
+		v, err := version.Query(context.Background())
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println(v)
+		return
+	}
 
 	if *hashPassword {
 		if err := printVerifier(os.Stdin, os.Stdout, *iterations); err != nil {

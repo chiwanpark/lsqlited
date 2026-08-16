@@ -200,7 +200,7 @@ func TestOpenSQLiteExtensionError(t *testing.T) {
 
 // TestSQLiteDriver checks the memoization of registered drivers: a name is
 // registered once per distinct extension set, and databases without
-// extensions keep using the stock driver.
+// extensions keep using the base driver.
 func TestSQLiteDriver(t *testing.T) {
 	if got := sqliteDriver(nil); got != baseDriverName {
 		t.Errorf("sqliteDriver(nil) = %q, want %q", got, baseDriverName)
@@ -210,7 +210,7 @@ func TestSQLiteDriver(t *testing.T) {
 
 	first := sqliteDriver(a)
 	if first == baseDriverName {
-		t.Fatal("extensions must not be registered on the stock driver")
+		t.Fatal("extensions must not be registered on the base driver")
 	}
 	// Registering the same name twice panics, so an identical set has to
 	// resolve to the driver registered the first time.
@@ -269,10 +269,12 @@ func TestExtensionsDefaultEntrypoints(t *testing.T) {
 	if len(paths) != 2 || paths[0] != "/tmp/a.so" || paths[1] != "/tmp/c.so" {
 		t.Errorf("defaultEntrypoints() = %v, want the entries without an entry point", paths)
 	}
+	// Every connection needs a hook, even one with no entry point to call,
+	// because lsqlited_version() is registered there too.
 	if hook := extensionHook(exts); hook == nil {
 		t.Error("extensionHook() = nil, want a hook for the named entry point")
 	}
-	if hook := extensionHook(Extensions{{Path: "/tmp/a.so"}}); hook != nil {
-		t.Error("extensionHook() returned a hook with nothing to load")
+	if hook := extensionHook(Extensions{{Path: "/tmp/a.so"}}); hook == nil {
+		t.Error("extensionHook() = nil, want a hook registering lsqlited_version()")
 	}
 }
