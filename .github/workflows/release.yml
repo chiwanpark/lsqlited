@@ -1,0 +1,121 @@
+name: Release
+
+on:
+  push:
+    branches:
+    # One branch per HeadVer release line: releases/v1 publishes
+    # 1.<yearweek>.<build>. The branch name is the only place a release line
+    # is declared, so starting v2 takes a branch and nothing else.
+    - releases/v*
+
+# The moving :<head> tag is rewritten on every run, so two pushes in quick
+# succession must not race for it.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  # cgo rules out cross-compiling, so any architecture the runner does not
+  # have is built under QEMU, which compiles the SQLite amalgamation at a
+  # crawl. Add linux/arm64 here once you are willing to wait for it.
+  PLATFORMS: linux/amd64
+
+jobs:
+  image:
+    name: Build and push image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read  # check out the source
+      packages: write # push to the container registry
+    steps:
+    - name: Check out repository
+      uses: actions/checkout@v6
+
+    - name: Compose the HeadVer version
+      id: version
+      run: |
+        set -euo pipefail
+
+        # releases/v1 -> 1. The trigger also matches names like releases/vone,
+        # which would produce a version no registry or human could order.
+        head="${GITHUB_REF_NAME#releases/v}"
+        case "${head}" in
+          '' | *[!0-9]*)
+            echo "::error::${GITHUB_REF_NAME} does not name a release line: expected releases/v<number>"
+            exit 1
+            ;;
+        esac
+
+        # {head}.{yearweek}.{build}. %G%V is the ISO 8601 year and week, which
+        # is what the ISOWeek() fallback inside the binary uses; %y%V would
+        # disagree with it in the last days of December.
+        version="${head}.$(date -u +%G%V | cut -c3-).${GITHUB_RUN_NUMBER}"
+
+        # Registries reject upper case, which an owner or repository may have.
+        image="${REGISTRY}/$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+
+        {
+          echo "head=${head}"
+          echo "version=${version}"
+          echo "image=${image}"
+        } >> "${GITHUB_OUTPUT}"
+
+        echo "Publishing \`${image}:${version}\`" >> "${GITHUB_STEP_SUMMARY}"
+
+    - name: Set up QEMU
+      # Only has an effect when PLATFORMS names a foreign architecture.
+      uses: docker/setup-qemu-action@v4
+
+    - name: Set up Buildx
+      uses: docker/setup-buildx-action@v4
+
+    - name: Log in to ${{ env.REGISTRY }}
+      uses: docker/login-action@v4
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        platforms: ${{ env.PLATFORMS }}
+        push: true
+        build-args: |
+          VERSION=${{ steps.version.outputs.version }}
+        # The exact version, plus a moving tag for the release line. There is
+        # deliberately no :latest: with more than one release line it would
+        # mean whichever line happened to build last.
+        tags: |
+          ${{ steps.version.outputs.image }}:${{ steps.version.outputs.version }}
+          ${{ steps.version.outputs.image }}:${{ steps.version.outputs.head }}
+        labels: |
+          org.opencontainers.image.title=lsqlited
+          org.opencontainers.image.description=Lightweight daemon serving SQLite databases over TCP
+          org.opencontainers.image.version=${{ steps.version.outputs.version }}
+          org.opencontainers.image.revision=${{ github.sha }}
+          org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          org.opencontainers.image.licenses=MIT
+        # Compiling SQLite through cgo dominates the build, so it is worth
+        # caching; a cache that misbehaves must not fail a release, though.
+        cache-from: type=gha
+        cache-to: type=gha,mode=max,ignore-error=true
+
+    - name: Verify the published image
+      env:
+        IMAGE: ${{ steps.version.outputs.image }}:${{ steps.version.outputs.version }}
+        WANT: ${{ steps.version.outputs.version }}
+      run: |
+        set -euo pipefail
+
+        # The tag is only trustworthy if the binary inside agrees with it, and
+        # the binary answers from lsqlited_version(), the same function
+        # clients call.
+        got="$(docker run --rm "${IMAGE}" -version)"
+        if [ "${got}" != "${WANT}" ]; then
+          echo "::error::${IMAGE} reports version ${got}"
+          exit 1
+        fi
+        echo "\`${IMAGE}\` reports \`${got}\`" >> "${GITHUB_STEP_SUMMARY}"

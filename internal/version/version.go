@@ -10,17 +10,19 @@
 //
 //	{head}.{yearweek}.{build}
 //
-// `head` is bumped by hand and lives in the `head` file next to this one, so
-// that the release tooling can read it without parsing Go. `yearweek` and
-// `build` are decided when the binary is built, and are baked in with:
+// All three fields are decided when the binary is built, and are baked in
+// with:
 //
-//	go build -ldflags "-X github.com/chiwanpark/lsqlited/internal/version.version=0.2534.7"
+//	go build -ldflags "-X github.com/chiwanpark/lsqlited/internal/version.version=1.2534.7"
+//
+// `head` comes from the release branch the build was cut from, so that a
+// release line is declared in exactly one place: pushing releases/v1 builds
+// 1.{yearweek}.{build}.
 package version
 
 import (
 	"context"
 	"database/sql"
-	_ "embed"
 	"fmt"
 	"strings"
 	"time"
@@ -37,12 +39,10 @@ const FuncName = "lsqlited_version"
 // through one derived from it when the database loads extensions.
 const DriverName = "sqlite3_lsqlited"
 
-// head is the manually controlled release number of HeadVer. It is embedded
-// from a file rather than written as a constant so that a release job can
-// read the very same value with `cat internal/version/head`.
-//
-//go:embed head
-var head string
+// devHead is the {head} of a build that was not stamped. Release builds take
+// theirs from the branch they are built from, so a local build belongs to no
+// release line at all, and 0 keeps it ordered before every one of them.
+const devHead = "0"
 
 // version is the full HeadVer string, baked in at build time with
 // -ldflags "-X github.com/chiwanpark/lsqlited/internal/version.version=...".
@@ -91,12 +91,7 @@ func current() string {
 	// one below is the week the binary runs in, not the week it was built
 	// in. Marking it as a pre-release keeps it ordered before the release
 	// it will become, and keeps it from being mistaken for one.
-	return fmt.Sprintf("%s.%s.0-dev", Head(), yearWeek(time.Now()))
-}
-
-// Head returns the manually controlled HeadVer release number.
-func Head() string {
-	return strings.TrimSpace(head)
+	return fmt.Sprintf("%s.%s.0-dev", devHead, yearWeek(time.Now()))
 }
 
 // yearWeek renders the {yearweek} field of HeadVer: a two-digit year

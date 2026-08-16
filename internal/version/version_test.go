@@ -3,7 +3,6 @@ package version
 import (
 	"context"
 	"regexp"
-	"strings"
 	"testing"
 	"time"
 )
@@ -54,7 +53,7 @@ func TestQueryUnstamped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
-	want := regexp.MustCompile(`^` + regexp.QuoteMeta(Head()) + `\.\d{4}\.0-dev$`)
+	want := regexp.MustCompile(`^` + regexp.QuoteMeta(devHead) + `\.\d{4}\.0-dev$`)
 	if !want.MatchString(got) {
 		t.Errorf("Query() = %q, want a development HeadVer matching %s", got, want)
 	}
@@ -67,18 +66,6 @@ func TestQueryCancelled(t *testing.T) {
 
 	if _, err := Query(ctx); err == nil {
 		t.Error("Query() with a cancelled context returned no error")
-	}
-}
-
-// TestHead checks that the release number is read from the file without the
-// trailing newline that any editor leaves behind.
-func TestHead(t *testing.T) {
-	got := Head()
-	if got == "" {
-		t.Fatal("Head() is empty, want the contents of internal/version/head")
-	}
-	if got != strings.TrimSpace(got) {
-		t.Errorf("Head() = %q, want it free of surrounding space", got)
 	}
 }
 

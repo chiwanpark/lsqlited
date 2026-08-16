@@ -1,0 +1,18 @@
+# Keep the build context small and avoid cache misses on files the build does
+# not use.
+.git
+.github
+.gitignore
+Dockerfile
+.dockerignore
+README.md
+LICENSE
+
+# Local artifacts (mirrors .gitignore).
+/lsqlited
+/bin/
+*.test
+*.out
+*.sqlite3
+*.db
+/lsqlited.yaml
