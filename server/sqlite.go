@@ -40,7 +40,7 @@ func openSQLite(path string, cfg *Config) (*sql.DB, error) {
 	// Extensions load when a connection is made, not by sql.Open, so pinging here attaches a missing library to opening
 	// the database rather than to whatever query happens to run first.
 	if err := db.Ping(); err != nil {
-		db.Close()
+		_ = db.Close()
 		if len(exts) > 0 {
 			return nil, fmt.Errorf("%w (extensions: %s)", err, strings.Join(exts.strings(), ", "))
 		}

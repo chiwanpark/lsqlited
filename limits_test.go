@@ -128,7 +128,7 @@ func TestMaxRowsFromDSN(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatalf("rows err: %v", err)
 	}
-	rows.Close()
+	_ = rows.Close()
 	if count != 5 {
 		t.Errorf("read %d rows, want 5", count)
 	}
@@ -194,7 +194,7 @@ func TestColumnTypes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("query: %v", err)
 			}
-			defer rows.Close()
+			defer func() { _ = rows.Close() }()
 			types, err := rows.ColumnTypes()
 			if err != nil {
 				t.Fatalf("column types: %v", err)
@@ -269,7 +269,7 @@ func TestWithoutLimits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var count int
 	for rows.Next() {
 		var n int

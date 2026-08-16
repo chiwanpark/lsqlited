@@ -123,7 +123,8 @@ func TestServerErrorIs(t *testing.T) {
 	for _, tc := range cases {
 		err := error(&ServerError{Code: tc.code, Message: "boom"})
 		for _, sentinel := range sentinels {
-			want := sentinel == tc.want
+			// Identity, not wrapping: the question is which sentinel this case expects.
+			want := sentinel == tc.want //nolint:errorlint
 			if got := errors.Is(err, sentinel); got != want {
 				t.Errorf("errors.Is(%q, %v) = %v, want %v", tc.code, sentinel, got, want)
 			}

@@ -137,7 +137,7 @@ func TestGrantsAreNotBoundToTheLoginDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Authenticate as alice while claiming the permitted "app" database.
 	clientNonce, err := auth.Nonce()
@@ -305,7 +305,7 @@ func TestPasswordNeverSentOverTheWire(t *testing.T) {
 	if err := db.Ping(); err != nil {
 		t.Fatalf("ping: %v", err)
 	}
-	db.Close()
+	_ = db.Close()
 
 	traffic := recorded()
 	if len(traffic) == 0 {
@@ -333,7 +333,7 @@ func TestReplayedProofIsRejected(t *testing.T) {
 	if err := db.Ping(); err != nil {
 		t.Fatalf("ping: %v", err)
 	}
-	db.Close()
+	_ = db.Close()
 
 	capturedProof := ""
 	for _, frame := range strings.Split(recorded(), "\n") {
@@ -351,7 +351,7 @@ func TestReplayedProofIsRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	nonce, err := auth.Nonce()
 	if err != nil {
@@ -416,7 +416,7 @@ func TestFailedAuthDoesNotOpenSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	nonce, err := auth.Nonce()
 	if err != nil {
@@ -479,7 +479,7 @@ func TestRogueServerIsDetected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 
 	go func() {
 		for {
@@ -488,7 +488,7 @@ func TestRogueServerIsDetected(t *testing.T) {
 				return
 			}
 			go func() {
-				defer conn.Close()
+				defer func() { _ = conn.Close() }()
 				for {
 					var req protocol.Request
 					if err := protocol.ReadMessage(conn, &req); err != nil {
@@ -553,26 +553,26 @@ func startRecordingProxy(t *testing.T, upstream string) (addr string, recorded f
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				defer client.Close()
+				defer func() { _ = client.Close() }()
 				server, err := net.Dial("tcp", upstream)
 				if err != nil {
 					return
 				}
-				defer server.Close()
+				defer func() { _ = server.Close() }()
 				done := make(chan struct{})
 				go func() {
 					defer close(done)
-					defer server.Close()
+					defer func() { _ = server.Close() }()
 					pipeFrames(server, client, record)
 				}()
 				pipeFrames(client, server, record)
-				client.Close()
+				_ = client.Close()
 				<-done
 			}()
 		}
 	}()
 	t.Cleanup(func() {
-		ln.Close()
+		_ = ln.Close()
 		wg.Wait()
 	})
 
@@ -612,7 +612,7 @@ func requestChallenge(t *testing.T, addr, user string) protocol.AuthChallenge {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	nonce, err := auth.Nonce()
 	if err != nil {

@@ -1,13 +1,46 @@
 version: "2"
 
-# Line length only. go vet and the test suite cover correctness; this file
-# exists to keep formatting from drifting.
+# Report every finding; the defaults cap duplicates at 3 per message, which
+# hides work rather than saving it.
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
 linters:
-  default: none
+  default: standard
   enable:
+  - bodyclose
+  - copyloopvar
+  - errorlint
   - lll
+  - misspell
+  - predeclared
+  - rowserrcheck
+  - unconvert
+  - usestdlibvars
+  - wastedassign
   settings:
     lll:
       # Tabs count as one character, matching gofmt's own view of a line.
       line-length: 120
       tab-width: 1
+    staticcheck:
+      # The upstream default, plus QF1008. Config embeds Limits, so QF1008 asks for c.validate() in place of
+      # c.Limits.validate() -- which reads like recursion inside Config.Validate, and breaks the symmetry with its
+      # siblings c.Params.validate(), c.TLS.validate() and c.Extensions.validate().
+      checks:
+      - all
+      - -ST1000
+      - -ST1003
+      - -ST1016
+      - -ST1020
+      - -ST1021
+      - -ST1022
+      - -QF1008
+  exclusions:
+    rules:
+    # Tests assert that a query fails, so they discard the rows: `_, err := db.Query(...)` leaves nothing to check.
+    # The guard still covers the production row loop, which is where a missed rows.Err silently truncates a result.
+    - path: _test\.go
+      linters:
+      - rowserrcheck

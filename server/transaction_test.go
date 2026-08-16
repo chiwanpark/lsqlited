@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -22,7 +23,7 @@ func dialRaw(t *testing.T, addr string) *rawClient {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	t.Cleanup(func() { conn.Close() })
+	t.Cleanup(func() { _ = conn.Close() })
 	return &rawClient{t: t, conn: conn}
 }
 
@@ -57,7 +58,7 @@ func TestAbandonedTransactionReleasesLock(t *testing.T) {
 	gone := dialRaw(t, addr)
 	gone.do(&protocol.Request{Type: protocol.TypeBegin, Database: "test"})
 	gone.exec("INSERT INTO t (n) VALUES (1)")
-	gone.conn.Close()
+	_ = gone.conn.Close()
 
 	// With the lock still held this waits out _busy_timeout and fails.
 	start := time.Now()
@@ -91,7 +92,7 @@ func TestIdleTransactionTimeout(t *testing.T) {
 	}
 	var resp protocol.Response
 	err := protocol.ReadMessage(idle.conn, &resp)
-	if err != io.EOF {
+	if !errors.Is(err, io.EOF) {
 		t.Fatalf("read after going idle: %v, want EOF", err)
 	}
 

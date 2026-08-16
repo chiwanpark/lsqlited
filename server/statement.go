@@ -78,7 +78,8 @@ func runQuery(ctx context.Context, q queryer, query string, args []any, limits s
 	if err != nil {
 		return statementResponse(ctx, err, limits.timeout)
 	}
-	defer rows.Close()
+	// Close reports errors already surfaced by rows.Err below.
+	defer func() { _ = rows.Close() }()
 
 	cols, err := rows.Columns()
 	if err != nil {
@@ -88,7 +89,7 @@ func runQuery(ctx context.Context, q queryer, query string, args []any, limits s
 	for rows.Next() {
 		if limits.maxRows > 0 && int64(len(resp.Rows)) >= limits.maxRows {
 			// Row N+1 exists. Closing the rows interrupts the statement, so the rest of the result is never computed.
-			rows.Close()
+			_ = rows.Close()
 			return codeResponse(protocol.CodeTooManyRows, "result exceeds the row limit of %d", limits.maxRows)
 		}
 		vals := make([]any, len(cols))

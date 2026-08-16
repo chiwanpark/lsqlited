@@ -53,15 +53,16 @@ func (c *conn) roundTrip(ctx context.Context, req *protocol.Request) (*protocol.
 	// callback is what keeps a request that completed in the very instant the context expired from leaving a deadline in
 	// the past for the next user of the connection.
 	interrupted := make(chan struct{})
+	// A failing SetDeadline means the connection is already unusable, which the surrounding read or write reports.
 	stop := context.AfterFunc(ctx, func() {
 		defer close(interrupted)
-		c.nc.SetDeadline(time.Now())
+		_ = c.nc.SetDeadline(time.Now())
 	})
 	defer func() {
 		if !stop() {
 			<-interrupted
 		}
-		c.nc.SetDeadline(time.Time{})
+		_ = c.nc.SetDeadline(time.Time{})
 	}()
 
 	req.Database = c.database

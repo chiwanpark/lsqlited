@@ -61,7 +61,7 @@ func TestOpenSQLiteWithParams(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open immutable: %v", err)
 	}
-	defer immutable.Close()
+	defer func() { _ = immutable.Close() }()
 
 	var n int
 	if err := immutable.QueryRow("SELECT count(*) FROM t").Scan(&n); err != nil {

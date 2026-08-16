@@ -83,7 +83,7 @@ func TestOpenSQLiteLoadsExtension(t *testing.T) {
 			if err != nil {
 				t.Fatalf("openSQLite: %v", err)
 			}
-			defer db.Close()
+			defer func() { _ = db.Close() }()
 			if got := answerOf(t, db, "lsqlited_answer"); got != 42 {
 				t.Errorf("lsqlited_answer() = %d, want 42", got)
 			}
@@ -104,7 +104,7 @@ func TestOpenSQLiteLoadsEveryExtension(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openSQLite: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if got := answerOf(t, db, "lsqlited_first"); got != 1 {
 		t.Errorf("lsqlited_first() = %d, want 1", got)
 	}
@@ -117,7 +117,7 @@ func TestOpenSQLiteLoadsEveryExtension(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openSQLite without extensions: %v", err)
 	}
-	defer other.Close()
+	defer func() { _ = other.Close() }()
 	if _, err := other.Query("SELECT lsqlited_first()"); err == nil {
 		t.Error("an extension leaked into a database configured without one")
 	}
@@ -137,7 +137,7 @@ func TestServerRegistersExtensions(t *testing.T) {
 		},
 		Databases: map[string]string{"app": testPath(t)},
 	})
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	db, err := srv.getDB("app")
 	if err != nil {
@@ -163,7 +163,7 @@ func TestOpenSQLiteExtensionError(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			db, err := openSQLite(testPath(t), &Config{Extensions: exts})
 			if err == nil {
-				db.Close()
+				_ = db.Close()
 				t.Fatal("expected an error for an unloadable extension")
 			}
 			if !strings.Contains(err.Error(), missing) {

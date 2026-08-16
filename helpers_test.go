@@ -21,7 +21,7 @@ func serve(t *testing.T, cfg *server.Config) string {
 	if err := srv.Start(); err != nil {
 		t.Fatalf("start server: %v", err)
 	}
-	t.Cleanup(func() { srv.Close() })
+	t.Cleanup(func() { _ = srv.Close() })
 	if got := srv.TLSEnabled(); got != cfg.TLS.Enabled() {
 		t.Fatalf("TLSEnabled() = %v, want %v", got, cfg.TLS.Enabled())
 	}
@@ -51,6 +51,6 @@ func openDSN(t *testing.T, dsn string) *sql.DB {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 	return db
 }

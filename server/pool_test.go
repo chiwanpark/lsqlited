@@ -31,13 +31,13 @@ func TestParallelReads(t *testing.T) {
 	if _, err := seed.Exec("CREATE TABLE t (n INTEGER)"); err != nil {
 		t.Fatalf("create table: %v", err)
 	}
-	seed.Close()
+	_ = seed.Close()
 
 	db, err := openSQLite(path, &Config{Params: Params{"mode": "ro"}})
 	if err != nil {
 		t.Fatalf("open read-only: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	var n int
 	start := time.Now()
@@ -80,14 +80,14 @@ func TestPoolReusesConnections(t *testing.T) {
 	if _, err := seed.Exec("CREATE TABLE t (n INTEGER)"); err != nil {
 		t.Fatalf("create table: %v", err)
 	}
-	seed.Close()
+	_ = seed.Close()
 
 	const workers, each = 8, 200
 	db, err := openSQLite(path, &Config{MaxConnections: workers})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	var wg sync.WaitGroup
 	errs := make(chan error, workers)
@@ -148,7 +148,7 @@ func TestConfigurePool(t *testing.T) {
 			if err != nil {
 				t.Fatalf("open: %v", err)
 			}
-			defer db.Close()
+			defer func() { _ = db.Close() }()
 
 			if got := db.Stats().MaxOpenConnections; got != tc.wantOpen {
 				t.Errorf("MaxOpenConnections = %d, want %d", got, tc.wantOpen)

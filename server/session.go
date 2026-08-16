@@ -46,11 +46,12 @@ func (p *peer) watch(cancel context.CancelFunc) (stop func() (gone bool)) {
 	}()
 	// The deadline releases the blocked Peek without closing the connection, which is still wanted when the statement
 	// finishes first.
+	// A failing SetReadDeadline means the connection is already unusable, which the next read reports.
 	return func() bool {
 		stopping.Store(true)
-		p.conn.SetReadDeadline(time.Now())
+		_ = p.conn.SetReadDeadline(time.Now())
 		<-done
-		p.conn.SetReadDeadline(time.Time{})
+		_ = p.conn.SetReadDeadline(time.Time{})
 		return gone.Load()
 	}
 }
@@ -100,8 +101,9 @@ func (t *transaction) end(ctx context.Context, statement string) error {
 
 // discard closes the connection and keeps the pool from handing it out again.
 func (t *transaction) discard() {
-	t.conn.Raw(func(any) error { return driver.ErrBadConn })
-	t.conn.Close()
+	// Raw returns the ErrBadConn this deliberately hands it, which is what marks the connection unusable.
+	_ = t.conn.Raw(func(any) error { return driver.ErrBadConn })
+	_ = t.conn.Close()
 }
 
 // session is the per-connection state: the authenticated user and an in-progress transaction, if any.
@@ -140,7 +142,9 @@ func (sess *session) idleDeadline() time.Time {
 func (sess *session) cleanup() {
 	if sess.tx != nil {
 		// The client is gone, so the rollback cannot wait on its context.
-		sess.tx.end(context.Background(), "ROLLBACK")
+		if err := sess.tx.end(context.Background(), "ROLLBACK"); err != nil {
+			sess.logger.Warn("rolling back an abandoned transaction failed", "error", err)
+		}
 		sess.tx = nil
 	}
 }

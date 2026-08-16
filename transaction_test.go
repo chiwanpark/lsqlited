@@ -65,11 +65,11 @@ func increment(db *sql.DB) error {
 	}
 	var n int
 	if err := tx.QueryRow("SELECT n FROM counter WHERE id = 1").Scan(&n); err != nil {
-		tx.Rollback()
+		_ = tx.Rollback()
 		return fmt.Errorf("read: %w", err)
 	}
 	if _, err := tx.Exec("UPDATE counter SET n = ? WHERE id = 1", n+1); err != nil {
-		tx.Rollback()
+		_ = tx.Rollback()
 		return fmt.Errorf("write: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -131,7 +131,7 @@ func TestBusyIsClassified(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.Exec("INSERT INTO t (n) VALUES (1)"); err != nil {
 		t.Fatalf("write in transaction: %v", err)
 	}

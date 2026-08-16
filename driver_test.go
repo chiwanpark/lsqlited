@@ -72,7 +72,7 @@ func TestEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var names []string
 	for rows.Next() {
 		var n string
@@ -149,7 +149,7 @@ func TestPreparedStatement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 	for i := 0; i < 5; i++ {
 		if _, err := stmt.Exec(i); err != nil {
 			t.Fatalf("stmt exec: %v", err)
@@ -280,7 +280,7 @@ func TestInvalidDSN(t *testing.T) {
 			// sql.Open defers validation for drivers without DriverContext, but ours implements it, so errors surface on Ping at
 			// latest.
 			err = db.Ping()
-			db.Close()
+			_ = db.Close()
 		}
 		if err == nil {
 			t.Errorf("expected error for DSN %q", dsn)

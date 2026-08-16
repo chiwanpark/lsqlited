@@ -16,7 +16,7 @@ func startTestServer(t *testing.T, cfg *Config) (*Server, string) {
 	if err := srv.Start(); err != nil {
 		t.Fatalf("start server: %v", err)
 	}
-	t.Cleanup(func() { srv.Close() })
+	t.Cleanup(func() { _ = srv.Close() })
 	return srv, srv.Addr().String()
 }
 

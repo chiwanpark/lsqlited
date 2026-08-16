@@ -86,7 +86,7 @@ func (c *connector) Connect(ctx context.Context) (driver.Conn, error) {
 	}
 	if c.cfg.username != "" {
 		if err := c.authenticate(ctx, cn); err != nil {
-			cn.Close()
+			_ = cn.Close()
 			return nil, err
 		}
 	}
@@ -102,17 +102,17 @@ func (c *connector) tlsHandshake(ctx context.Context, nc net.Conn) (net.Conn, er
 	}
 	if c.cfg.dialTimeout > 0 {
 		if err := nc.SetDeadline(time.Now().Add(c.cfg.dialTimeout)); err != nil {
-			nc.Close()
+			_ = nc.Close()
 			return nil, fmt.Errorf("lsqlited: %w", err)
 		}
 	}
 	tc := tls.Client(nc, c.cfg.tls)
 	if err := tc.HandshakeContext(ctx); err != nil {
-		tc.Close()
+		_ = tc.Close()
 		return nil, fmt.Errorf("lsqlited: tls handshake with %s: %w", c.cfg.addr, err)
 	}
 	if err := tc.SetDeadline(time.Time{}); err != nil {
-		tc.Close()
+		_ = tc.Close()
 		return nil, fmt.Errorf("lsqlited: %w", err)
 	}
 	return tc, nil

@@ -129,7 +129,7 @@ func TestWriteResponseTooLarge(t *testing.T) {
 
 func TestPeerWatchCancelsOnDisconnect(t *testing.T) {
 	client, server := net.Pipe()
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -142,7 +142,7 @@ func TestPeerWatchCancelsOnDisconnect(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	client.Close()
+	_ = client.Close()
 	select {
 	case <-ctx.Done():
 	case <-time.After(5 * time.Second):
@@ -155,8 +155,8 @@ func TestPeerWatchCancelsOnDisconnect(t *testing.T) {
 
 func TestPeerWatchKeepsPipelinedRequest(t *testing.T) {
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -164,7 +164,7 @@ func TestPeerWatchKeepsPipelinedRequest(t *testing.T) {
 	stop := p.watch(cancel)
 
 	// A client that pipelines the next request behind the running one must not lose it: Peek looks without consuming.
-	go client.Write([]byte("hello"))
+	go func() { _, _ = client.Write([]byte("hello")) }()
 
 	if stop() {
 		t.Error("stop() = true, want false while the peer is still there")
@@ -183,8 +183,8 @@ func TestPeerWatchKeepsPipelinedRequest(t *testing.T) {
 
 func TestPeerWatchLeavesConnectionUsable(t *testing.T) {
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	_, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -194,7 +194,7 @@ func TestPeerWatchLeavesConnectionUsable(t *testing.T) {
 	if p.watch(cancel)() {
 		t.Fatal("stop() = true, want false with the peer still connected")
 	}
-	go client.Write([]byte("next"))
+	go func() { _, _ = client.Write([]byte("next")) }()
 	got := make([]byte, 4)
 	if _, err := p.br.Read(got); err != nil {
 		t.Fatalf("read after the watcher stopped: %v", err)
@@ -219,7 +219,7 @@ func TestDisconnectInterruptsStatement(t *testing.T) {
 	}
 	// Give the statement time to start before pulling the rug out.
 	time.Sleep(200 * time.Millisecond)
-	conn.Close()
+	_ = conn.Close()
 
 	closed := make(chan error, 1)
 	go func() { closed <- srv.Close() }()
@@ -242,7 +242,7 @@ func TestStatementTimeoutInterrupts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	start := time.Now()
 	req := &protocol.Request{Type: protocol.TypeQuery, Database: "test", Query: forever}

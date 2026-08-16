@@ -194,8 +194,9 @@ func (s *Server) Close() error {
 			firstErr = err
 		}
 	}
+	// Forcing the sockets shut is what unblocks the request loops; a close error changes nothing.
 	for _, conn := range conns {
-		conn.Close()
+		_ = conn.Close()
 	}
 	s.wg.Wait()
 	for _, db := range dbs {
@@ -244,7 +245,8 @@ func (s *Server) acceptLoop(ln net.Listener) {
 		s.mu.Lock()
 		if s.closed {
 			s.mu.Unlock()
-			conn.Close()
+			// Accepted during shutdown, so the peer is turned away without ever being served.
+			_ = conn.Close()
 			return
 		}
 		s.conns[conn] = struct{}{}
@@ -260,7 +262,8 @@ func (s *Server) handleConn(conn net.Conn) {
 		s.mu.Lock()
 		delete(s.conns, conn)
 		s.mu.Unlock()
-		conn.Close()
+		// The session is over either way; a close error has nobody left to report to.
+		_ = conn.Close()
 	}()
 
 	logger := s.logger.With("remote", conn.RemoteAddr())
@@ -289,7 +292,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			switch {
 			case sess.tx != nil && os.IsTimeout(err):
 				logger.Warn("rolling back a transaction left idle", "idle_timeout", sess.tx.idleTimeout)
-			case err != io.EOF && !errors.Is(err, net.ErrClosed):
+			case !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed):
 				logger.Debug("read request failed", "error", err)
 			}
 			return

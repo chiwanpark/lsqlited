@@ -27,7 +27,7 @@ func TestOpenSQLiteRegistersVersion(t *testing.T) {
 		if err != nil {
 			t.Fatalf("openSQLite: %v", err)
 		}
-		defer db.Close()
+		defer func() { _ = db.Close() }()
 
 		if got := versionOf(t, db); got != want {
 			t.Errorf("%s() = %q, want %q", version.FuncName, got, want)
@@ -41,7 +41,7 @@ func TestOpenSQLiteRegistersVersion(t *testing.T) {
 		if err != nil {
 			t.Fatalf("openSQLite: %v", err)
 		}
-		defer db.Close()
+		defer func() { _ = db.Close() }()
 
 		if got := versionOf(t, db); got != want {
 			t.Errorf("%s() = %q, want %q", version.FuncName, got, want)
@@ -61,7 +61,7 @@ func TestOpenSQLiteRegistersVersion(t *testing.T) {
 		if err != nil {
 			t.Fatalf("openSQLite: %v", err)
 		}
-		defer db.Close()
+		defer func() { _ = db.Close() }()
 
 		if got := versionOf(t, db); got != want {
 			t.Errorf("%s() = %q, want %q", version.FuncName, got, want)
