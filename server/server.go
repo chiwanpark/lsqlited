@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -14,6 +15,8 @@ import (
 	"log/slog"
 	"net"
 	"net/url"
+	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -277,11 +280,24 @@ func (s *Server) handleConn(conn net.Conn) {
 	defer sess.cleanup()
 
 	for {
+		// A transaction holds the write lock, so a session that abandons one
+		// is not waited for indefinitely: the read deadline ends the session,
+		// and the deferred cleanup rolls the transaction back.
+		if err := conn.SetReadDeadline(sess.idleDeadline()); err != nil {
+			return
+		}
 		var req protocol.Request
 		if err := protocol.ReadMessage(br, &req); err != nil {
-			if err != io.EOF && !errors.Is(err, net.ErrClosed) {
+			switch {
+			case sess.tx != nil && os.IsTimeout(err):
+				logger.Warn("rolling back a transaction left idle",
+					"idle_timeout", sess.tx.idleTimeout)
+			case err != io.EOF && !errors.Is(err, net.ErrClosed):
 				logger.Debug("read request failed", "error", err)
 			}
+			return
+		}
+		if err := conn.SetReadDeadline(time.Time{}); err != nil {
 			return
 		}
 		resp := sess.handle(ctx, &req)
@@ -336,7 +352,7 @@ func (s *Server) getDB(name string) (*sql.DB, error) {
 	if db, ok := s.dbs[name]; ok {
 		return db, nil
 	}
-	cfg, ok := s.cfg.Databases[name]
+	cfg, ok := s.cfg.databaseConfig(name)
 	if !ok {
 		return nil, fmt.Errorf("unknown database %q", name)
 	}
@@ -366,12 +382,47 @@ func sqliteDSN(cfg DatabaseConfig, global Params) string {
 	return "file:" + cfg.Path + "?" + q.Encode()
 }
 
+// idleConnTimeout releases a pooled connection that has gone unused for a
+// while, so that a database which saw a burst and then went quiet gives back
+// the page cache each of its connections holds.
+const idleConnTimeout = 5 * time.Minute
+
+// configurePool sizes the connection pool of a database. SQLite runs
+// statements on separate connections in parallel — readers never block one
+// another, and only writers take turns — so the pool is what decides how
+// much of that parallelism the daemon can use.
+//
+// It also decides how often a connection is opened rather than reused, which
+// matters more than it sounds: database/sql keeps two connections idle by
+// default, so a database busier than that pays on most statements for a file
+// to open, a schema to parse and every extension to load again. Keeping as
+// many connections warm as the database is allowed to open avoids that
+// entirely.
+func configurePool(db *sql.DB, maxConns int) {
+	idle := defaultIdleConns()
+	if maxConns > 0 {
+		db.SetMaxOpenConns(maxConns)
+		idle = maxConns
+	}
+	db.SetMaxIdleConns(idle)
+	db.SetConnMaxIdleTime(idleConnTimeout)
+}
+
+// defaultIdleConns is how many connections a database keeps warm when
+// nothing bounds its pool. Statements are CPU-bound once the pages are
+// cached, so a core's worth of connections is enough to keep the machine
+// busy; a burst may open more, they are simply not all kept.
+func defaultIdleConns() int {
+	return max(4, runtime.NumCPU())
+}
+
 func openSQLite(cfg DatabaseConfig, global Params, globalExts Extensions) (*sql.DB, error) {
 	exts := globalExts.merge(cfg.Extensions)
 	db, err := sql.Open(sqliteDriver(exts), sqliteDSN(cfg, global))
 	if err != nil {
 		return nil, err
 	}
+	configurePool(db, cfg.MaxConnections)
 	// Extensions are loaded when a connection is made, not by sql.Open, so
 	// a missing library only surfaces on the first use. Pinging here keeps
 	// that failure attached to opening the database rather than to whatever
@@ -490,12 +541,76 @@ func (p *peer) watch(cancel context.CancelFunc) (stop func() (gone bool)) {
 	}
 }
 
+// transaction is a client transaction. It is pinned to one SQLite
+// connection for its whole life, because that is where SQLite keeps the
+// locks and the uncommitted pages: statements of the same transaction that
+// landed on different connections would be different transactions.
+type transaction struct {
+	conn     *sql.Conn
+	readOnly bool
+	// idleTimeout bounds how long the session may leave the transaction
+	// alone before the daemon rolls it back. Zero waits forever.
+	idleTimeout time.Duration
+}
+
+// begin opens the transaction.
+//
+// A transaction that may write takes the write lock now rather than on its
+// first write. SQLite refuses to hand the lock to a transaction that has
+// already read when another connection wrote in the meantime — it returns
+// SQLITE_BUSY at once and does not wait, since waiting could deadlock — so a
+// read-then-write transaction fails outright often enough to matter. Asking
+// up front turns that into an ordinary wait, bounded by _busy_timeout.
+//
+// A read-only transaction has nothing to upgrade, so it starts deferred and
+// runs alongside every other reader. query_only keeps that promise true even
+// if the client sends a write after all.
+func (t *transaction) begin(ctx context.Context) error {
+	if !t.readOnly {
+		_, err := t.conn.ExecContext(ctx, "BEGIN IMMEDIATE")
+		return err
+	}
+	if _, err := t.conn.ExecContext(ctx, "PRAGMA query_only = ON"); err != nil {
+		return err
+	}
+	_, err := t.conn.ExecContext(ctx, "BEGIN")
+	return err
+}
+
+// end finishes the transaction with COMMIT or ROLLBACK and gives the
+// connection back to the pool. A connection whose transaction state is no
+// longer certain is discarded instead: reusing it would hand someone else a
+// connection that is still inside a transaction, or still read-only.
+func (t *transaction) end(ctx context.Context, statement string) error {
+	if _, err := t.conn.ExecContext(ctx, statement); err != nil {
+		t.discard()
+		return err
+	}
+	if t.readOnly {
+		if _, err := t.conn.ExecContext(ctx, "PRAGMA query_only = OFF"); err != nil {
+			// The transaction itself ended cleanly, so this is not the
+			// client's problem; only the connection is unusable.
+			t.discard()
+			return nil
+		}
+	}
+	return t.conn.Close()
+}
+
+// discard closes the connection and keeps the pool from handing it out
+// again. Returning driver.ErrBadConn is how database/sql is told that a
+// connection is spent.
+func (t *transaction) discard() {
+	t.conn.Raw(func(any) error { return driver.ErrBadConn })
+	t.conn.Close()
+}
+
 // session holds per-connection state, most importantly the authenticated
 // user and an in-progress transaction, if any.
 type session struct {
 	srv    *Server
 	logger *slog.Logger
-	tx     *sql.Tx
+	tx     *transaction
 	// peer is the connection the session serves. It is nil when there is no
 	// connection to watch, which leaves statements running until they finish
 	// or time out.
@@ -518,9 +633,22 @@ type pendingAuth struct {
 	known bool
 }
 
+// idleDeadline is how long the session may stay quiet before the daemon
+// gives up on it. Only a session holding a transaction has one, since only
+// that one is holding something back.
+func (sess *session) idleDeadline() time.Time {
+	if sess.tx == nil || sess.tx.idleTimeout <= 0 {
+		return time.Time{}
+	}
+	return time.Now().Add(sess.tx.idleTimeout)
+}
+
 func (sess *session) cleanup() {
 	if sess.tx != nil {
-		sess.tx.Rollback()
+		// A client that goes away mid-transaction must not leave the write
+		// lock behind it, so the rollback is not allowed to wait on the
+		// client's context, which is already done.
+		sess.tx.end(context.Background(), "ROLLBACK")
 		sess.tx = nil
 	}
 }
@@ -552,9 +680,9 @@ func (sess *session) handle(ctx context.Context, req *protocol.Request) *protoco
 	case protocol.TypeBegin:
 		return sess.handleBegin(ctx, req)
 	case protocol.TypeCommit:
-		return sess.handleCommit()
+		return sess.handleCommit(ctx, req)
 	case protocol.TypeRollback:
-		return sess.handleRollback()
+		return sess.handleRollback(ctx, req)
 	case protocol.TypeQuery, protocol.TypeExec:
 		return sess.handleStatement(ctx, req)
 	default:
@@ -648,34 +776,52 @@ func (sess *session) handleBegin(ctx context.Context, req *protocol.Request) *pr
 	if err != nil {
 		return errResponse(err)
 	}
-	tx, err := db.BeginTx(ctx, nil)
+	// Beginning can wait: for a free connection when the pool is bounded,
+	// and for the write lock when another transaction holds it. Both are
+	// bounded by the same timeout a statement gets.
+	limits := sess.srv.limits(req)
+	timeout := limits.timeout
+	ctx, cancel := statementContext(ctx, timeout)
+	defer cancel()
+	conn, err := db.Conn(ctx)
 	if err != nil {
-		return errResponse(err)
+		return statementResponse(ctx, err, timeout)
+	}
+	tx := &transaction{
+		conn:        conn,
+		readOnly:    req.ReadOnly,
+		idleTimeout: limits.transactionTimeout,
+	}
+	if err := tx.begin(ctx); err != nil {
+		tx.discard()
+		return statementResponse(ctx, err, timeout)
 	}
 	sess.tx = tx
 	return &protocol.Response{}
 }
 
-func (sess *session) handleCommit() *protocol.Response {
-	if sess.tx == nil {
-		return errResponse(errors.New("no transaction in progress"))
-	}
-	err := sess.tx.Commit()
-	sess.tx = nil
-	if err != nil {
-		return errResponse(err)
-	}
-	return &protocol.Response{}
+func (sess *session) handleCommit(ctx context.Context, req *protocol.Request) *protocol.Response {
+	return sess.endTransaction(ctx, req, "COMMIT")
 }
 
-func (sess *session) handleRollback() *protocol.Response {
+func (sess *session) handleRollback(ctx context.Context, req *protocol.Request) *protocol.Response {
+	return sess.endTransaction(ctx, req, "ROLLBACK")
+}
+
+// endTransaction finishes the session's transaction. The transaction is let
+// go whatever happens: a COMMIT that fails has left nothing to commit, and a
+// session holding on to it would keep the write lock from everyone else.
+func (sess *session) endTransaction(ctx context.Context, req *protocol.Request, statement string) *protocol.Response {
 	if sess.tx == nil {
 		return errResponse(errors.New("no transaction in progress"))
 	}
-	err := sess.tx.Rollback()
+	tx := sess.tx
 	sess.tx = nil
-	if err != nil {
-		return errResponse(err)
+	timeout := sess.srv.limits(req).timeout
+	ctx, cancel := statementContext(ctx, timeout)
+	defer cancel()
+	if err := tx.end(ctx, statement); err != nil {
+		return statementResponse(ctx, err, timeout)
 	}
 	return &protocol.Response{}
 }
@@ -702,7 +848,7 @@ func (sess *session) handleStatement(ctx context.Context, req *protocol.Request)
 	}
 	var q queryer
 	if sess.tx != nil {
-		q = sess.tx
+		q = sess.tx.conn
 	} else {
 		db, err := sess.srv.getDB(req.Database)
 		if err != nil {
@@ -724,17 +870,14 @@ func (sess *session) handleStatement(ctx context.Context, req *protocol.Request)
 	if req.Type == protocol.TypeQuery {
 		resp = runQuery(ctx, q, req.Query, args, limits)
 	} else {
-		resp = runExec(ctx, q, req.Query, args)
+		resp = runExec(ctx, q, req.Query, args, limits)
 	}
 
 	if stop() {
 		return nil
 	}
-	if resp.Error != "" && resp.Code == "" && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		// SQLite reports the interruption in its own words; the code is
-		// what tells the client it ran out of time.
+	if resp.Code == protocol.CodeTimeout {
 		sess.logger.Debug("statement timed out", "database", req.Database, "timeout", limits.timeout)
-		return codeResponse(protocol.CodeTimeout, "statement exceeded the time limit of %s", limits.timeout)
 	}
 	return resp
 }
@@ -751,13 +894,13 @@ func statementContext(ctx context.Context, timeout time.Duration) (context.Conte
 func runQuery(ctx context.Context, q queryer, query string, args []any, limits statementLimits) *protocol.Response {
 	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
-		return errResponse(err)
+		return statementResponse(ctx, err, limits.timeout)
 	}
 	defer rows.Close()
 
 	cols, err := rows.Columns()
 	if err != nil {
-		return errResponse(err)
+		return statementResponse(ctx, err, limits.timeout)
 	}
 	resp := &protocol.Response{Columns: cols, ColumnTypes: columnTypes(rows)}
 	// size grows with the result so that an oversized one is stopped while
@@ -777,7 +920,7 @@ func runQuery(ctx context.Context, q queryer, query string, args []any, limits s
 			ptrs[i] = &vals[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
-			return errResponse(err)
+			return statementResponse(ctx, err, limits.timeout)
 		}
 		encoded, err := protocol.EncodeValues(vals)
 		if err != nil {
@@ -794,7 +937,7 @@ func runQuery(ctx context.Context, q queryer, query string, args []any, limits s
 		resp.Rows = append(resp.Rows, encoded)
 	}
 	if err := rows.Err(); err != nil {
-		return errResponse(err)
+		return statementResponse(ctx, err, limits.timeout)
 	}
 	return resp
 }
@@ -847,10 +990,10 @@ func rowSize(vals []protocol.Value) int64 {
 	return size
 }
 
-func runExec(ctx context.Context, q queryer, query string, args []any) *protocol.Response {
+func runExec(ctx context.Context, q queryer, query string, args []any, limits statementLimits) *protocol.Response {
 	res, err := q.ExecContext(ctx, query, args...)
 	if err != nil {
-		return errResponse(err)
+		return statementResponse(ctx, err, limits.timeout)
 	}
 	resp := &protocol.Response{}
 	if id, err := res.LastInsertId(); err == nil {
@@ -873,4 +1016,32 @@ func errResponse(err error) *protocol.Response {
 // that ran out of time or a result that outgrew a limit.
 func codeResponse(code, format string, args ...any) *protocol.Response {
 	return &protocol.Response{Error: fmt.Sprintf(format, args...), Code: code}
+}
+
+// statementResponse turns the failure of a statement or a transaction into a
+// response, naming the reasons a client can do something about. SQLite's own
+// message is kept in every case; only the code is added.
+func statementResponse(ctx context.Context, err error, timeout time.Duration) *protocol.Response {
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		// SQLite reports the interruption in its own words, which say
+		// nothing about a deadline; the code is what tells the client that
+		// its statement ran out of time.
+		return codeResponse(protocol.CodeTimeout, "statement exceeded the time limit of %s", timeout)
+	case isBusy(err):
+		return &protocol.Response{Error: err.Error(), Code: protocol.CodeBusy}
+	default:
+		return errResponse(err)
+	}
+}
+
+// isBusy reports whether err is SQLite refusing to wait any longer for a
+// lock another connection holds. Nothing is wrong with the statement, so the
+// client is told to try again rather than to fix it.
+func isBusy(err error) bool {
+	var sqliteErr sqlite3.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	return sqliteErr.Code == sqlite3.ErrBusy || sqliteErr.Code == sqlite3.ErrLocked
 }

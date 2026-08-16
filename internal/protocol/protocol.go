@@ -45,6 +45,10 @@ const (
 	// CodeResponseTooLarge means the encoded result outgrew the effective
 	// response size limit.
 	CodeResponseTooLarge = "response_too_large"
+	// CodeBusy means another connection held the lock the statement needed
+	// for longer than SQLite was willing to wait. Nothing is wrong with the
+	// statement itself; running it again later is the remedy.
+	CodeBusy = "busy"
 )
 
 // Request is a message sent from the driver to the server.
@@ -74,6 +78,11 @@ type Request struct {
 	// means the client imposes no limit. As with TimeoutMS, the server's
 	// own limit still applies.
 	MaxRows int64 `json:"max_rows,omitempty"`
+	// ReadOnly marks a TypeBegin request as a transaction that will not
+	// write. Such a transaction runs deferred, alongside other readers, and
+	// the server rejects any write it attempts after all. A transaction
+	// without the flag takes SQLite's write lock when it begins.
+	ReadOnly bool `json:"read_only,omitempty"`
 }
 
 // AuthChallenge is the server's answer to a TypeAuthInit request. It tells

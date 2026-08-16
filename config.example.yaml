@@ -14,6 +14,13 @@ listen:
 # limit. The statement is interrupted when the time is up, and the client is
 # told why.
 query_timeout: 60
+# How long a transaction may sit without a request, in seconds, before the
+# daemon rolls it back and drops the session. Omit to wait forever. A write
+# transaction holds SQLite's write lock from the moment it begins, so a client
+# that walks away from one keeps every other writer waiting. A client that
+# disconnects is rolled back at once, whatever this says.
+transaction_timeout: 30
+
 # Upper bound on the rows one query result may carry. Omit for no limit. The
 # daemon stops scanning at the first row past the limit instead of building
 # the whole result and rejecting it afterwards.
@@ -22,6 +29,18 @@ max_rows: 5000
 # 67108864, the frame limit of the protocol). Checked while the result is
 # built, so the memory is never spent on a result that will be refused.
 max_response_bytes: 67108864
+
+# How many SQLite connections one database may have open at a time, which is
+# how many statements it can run in parallel. Readers never block each other,
+# so this is what decides how much of the machine a busy database can use.
+# Omit for no bound. The daemon keeps this many connections warm, so
+# statements reuse them instead of reopening the file and reparsing the
+# schema; when it is omitted it keeps a core's worth.
+#
+# A statement waiting for a free connection waits under its query_timeout,
+# and an open transaction holds one until it ends, so allow at least as many
+# as you expect concurrent transactions.
+max_connections: 16
 
 # Transport security. Omit the whole section to serve plaintext TCP, in which
 # case queries and results are readable by anyone on the path. Clients opt in
@@ -44,7 +63,11 @@ tls:
 # SQLite open parameters applied to every database below. Accepts a query
 # string (params: _journal_mode=WAL&cache=shared) or a mapping. Parameters set
 # on an individual database take precedence over these.
-# _busy_timeout defaults to 5000 unless overridden here or per database.
+# _busy_timeout defaults to 5000 unless overridden here or per database; it is
+# how long a statement waits for a lock another connection holds before it
+# gives up with a `busy` error. _journal_mode=WAL is worth setting on a
+# database that is written while it is read: with the default rollback journal
+# a writer and a reader exclude each other.
 params:
   _journal_mode: WAL
   _foreign_keys: true
@@ -116,6 +139,8 @@ databases:
     # Extra SQLite DSN parameters appended to the file: URI used to open this
     # database. Use mode=ro to serve a database read-only.
     params: mode=ro&immutable=true
+    # Nothing writes to this one, so let readers have the whole machine.
+    max_connections: 32
     # Extensions loaded for this database only, after the global ones above.
     # Repeating a global extension here is a no-op.
     extensions:

@@ -118,6 +118,11 @@ func TestCompatibility(t *testing.T) {
 	if decoded.TimeoutMS != 0 || decoded.MaxRows != 0 {
 		t.Errorf("limits = %d/%d, want 0/0", decoded.TimeoutMS, decoded.MaxRows)
 	}
+	// A begin from such a client is a write transaction, which is the
+	// safe reading of a request that does not say.
+	if decoded.ReadOnly {
+		t.Error("read_only = true, want false")
+	}
 }
 
 func TestReadMessageTooLarge(t *testing.T) {

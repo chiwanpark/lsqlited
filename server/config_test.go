@@ -66,6 +66,7 @@ func TestLoadConfigLimits(t *testing.T) {
 	path := writeConfig(t, `
 listen: {port: 7890}
 query_timeout: 60
+transaction_timeout: 30
 max_rows: 5000
 max_response_bytes: 1048576
 databases:
@@ -74,6 +75,7 @@ databases:
   reports:
     path: /tmp/reports.sqlite3
     query_timeout: 90
+    transaction_timeout: 5
     max_rows: 100
     max_response_bytes: 4096
 `)
@@ -81,14 +83,14 @@ databases:
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	want := Limits{QueryTimeout: 60, MaxRows: 5000, MaxResponseBytes: 1 << 20}
+	want := Limits{QueryTimeout: 60, TransactionTimeout: 30, MaxRows: 5000, MaxResponseBytes: 1 << 20}
 	if cfg.Limits != want {
 		t.Errorf("server limits = %+v, want %+v", cfg.Limits, want)
 	}
 	if got := cfg.Databases["app"].Limits; got != (Limits{}) {
 		t.Errorf("app limits = %+v, want none", got)
 	}
-	wantDB := Limits{QueryTimeout: 90, MaxRows: 100, MaxResponseBytes: 4096}
+	wantDB := Limits{QueryTimeout: 90, TransactionTimeout: 5, MaxRows: 100, MaxResponseBytes: 4096}
 	if got := cfg.Databases["reports"].Limits; got != wantDB {
 		t.Errorf("reports limits = %+v, want %+v", got, wantDB)
 	}
@@ -108,11 +110,57 @@ databases:
 		t.Errorf("limits = %+v, want none", cfg.Limits)
 	}
 	resolved := cfg.Limits.resolve(cfg.Databases["app"].Limits)
-	if resolved.timeout != 0 || resolved.maxRows != 0 {
+	if resolved.timeout != 0 || resolved.maxRows != 0 || resolved.transactionTimeout != 0 {
 		t.Errorf("resolved limits = %+v, want unbounded time and rows", resolved)
 	}
 	if resolved.maxResponseBytes != DefaultMaxResponseBytes {
 		t.Errorf("maxResponseBytes = %d, want %d", resolved.maxResponseBytes, int64(DefaultMaxResponseBytes))
+	}
+}
+
+func TestLoadConfigMaxConnections(t *testing.T) {
+	path := writeConfig(t, `
+listen: {port: 7890}
+max_connections: 8
+databases:
+  app:
+    path: /tmp/app.sqlite3
+  reports:
+    path: /tmp/reports.sqlite3
+    max_connections: 2
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.MaxConnections != 8 {
+		t.Errorf("max_connections = %d, want 8", cfg.MaxConnections)
+	}
+	// A database without one inherits the server's; its own wins.
+	app, ok := cfg.databaseConfig("app")
+	if !ok || app.MaxConnections != 8 {
+		t.Errorf("app max_connections = %d, want 8", app.MaxConnections)
+	}
+	reports, ok := cfg.databaseConfig("reports")
+	if !ok || reports.MaxConnections != 2 {
+		t.Errorf("reports max_connections = %d, want 2", reports.MaxConnections)
+	}
+	if _, ok := cfg.databaseConfig("nope"); ok {
+		t.Error("databaseConfig found a database that is not configured")
+	}
+
+	// Silence leaves the pool unbounded.
+	silent := writeConfig(t, `
+listen: {port: 7890}
+databases:
+  app: {path: /tmp/app.sqlite3}
+`)
+	cfg, err = LoadConfig(silent)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if app, _ := cfg.databaseConfig("app"); app.MaxConnections != 0 {
+		t.Errorf("app max_connections = %d, want 0", app.MaxConnections)
 	}
 }
 
@@ -276,6 +324,23 @@ databases:
 listen: {port: 7890}
 databases:
   app: {path: /tmp/app.sqlite3, max_rows: -1}
+`,
+		"negative max connections": `
+listen: {port: 7890}
+max_connections: -1
+databases:
+  app: {path: /tmp/app.sqlite3}
+`,
+		"negative transaction timeout": `
+listen: {port: 7890}
+transaction_timeout: -30
+databases:
+  app: {path: /tmp/app.sqlite3}
+`,
+		"negative database max connections": `
+listen: {port: 7890}
+databases:
+  app: {path: /tmp/app.sqlite3, max_connections: -4}
 `,
 		"malformed database query timeout": `
 listen: {port: 7890}

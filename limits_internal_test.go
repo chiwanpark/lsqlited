@@ -117,8 +117,9 @@ func TestServerErrorIs(t *testing.T) {
 		{code: protocol.CodeTimeout, want: ErrTimeout},
 		{code: protocol.CodeTooManyRows, want: ErrTooManyRows},
 		{code: protocol.CodeResponseTooLarge, want: ErrResponseTooLarge},
+		{code: protocol.CodeBusy, want: ErrBusy},
 	}
-	sentinels := []error{ErrTimeout, ErrTooManyRows, ErrResponseTooLarge}
+	sentinels := []error{ErrTimeout, ErrTooManyRows, ErrResponseTooLarge, ErrBusy}
 	for _, tc := range cases {
 		err := error(&ServerError{Code: tc.code, Message: "boom"})
 		for _, sentinel := range sentinels {

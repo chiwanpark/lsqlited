@@ -51,6 +51,10 @@ type Config struct {
 	// Limits bound the work a single statement may do. They apply to every
 	// database, unless the database sets its own.
 	Limits `yaml:",inline"`
+	// MaxConnections bounds the SQLite connections one database may have
+	// open at a time, which is how many statements it can run in parallel.
+	// Zero (the default) leaves it unbounded. A database may set its own.
+	MaxConnections int `yaml:"max_connections"`
 	// Params are SQLite DSN query parameters applied to every database.
 	// Per-database params take precedence over them.
 	Params Params `yaml:"params"`
@@ -240,6 +244,12 @@ type Limits struct {
 	// QueryTimeout is the upper bound on how long a single statement may
 	// run, in seconds. Zero (the default) leaves statements unbounded.
 	QueryTimeout int64 `yaml:"query_timeout"`
+	// TransactionTimeout is how long a transaction may sit without a
+	// request, in seconds, before the daemon rolls it back and drops the
+	// session. A transaction holds SQLite's write lock from the moment it
+	// begins, so a client that walks away from one keeps every other writer
+	// waiting. Zero (the default) waits forever.
+	TransactionTimeout int64 `yaml:"transaction_timeout"`
 	// MaxRows is the upper bound on the number of rows one query result may
 	// carry. Zero (the default) leaves results unbounded.
 	MaxRows int64 `yaml:"max_rows"`
@@ -254,16 +264,19 @@ type Limits struct {
 // is a duration here because a client may ask for finer granularity than the
 // whole seconds the configuration is written in.
 type statementLimits struct {
-	timeout          time.Duration
-	maxRows          int64
-	maxResponseBytes int64
+	timeout            time.Duration
+	transactionTimeout time.Duration
+	maxRows            int64
+	maxResponseBytes   int64
 }
 
 // resolve combines the server-wide limits in l with those of a database,
 // which win where they are set, and applies the default response size.
 func (l Limits) resolve(db Limits) statementLimits {
 	resolved := statementLimits{
-		timeout:          time.Duration(minNonZero(l.QueryTimeout, db.QueryTimeout)) * time.Second,
+		timeout: time.Duration(minNonZero(l.QueryTimeout, db.QueryTimeout)) * time.Second,
+		transactionTimeout: time.Duration(minNonZero(
+			l.TransactionTimeout, db.TransactionTimeout)) * time.Second,
 		maxRows:          minNonZero(l.MaxRows, db.MaxRows),
 		maxResponseBytes: db.MaxResponseBytes,
 	}
@@ -281,6 +294,9 @@ func (l Limits) resolve(db Limits) statementLimits {
 func (l Limits) validate() error {
 	if l.QueryTimeout < 0 {
 		return fmt.Errorf("query_timeout must not be negative, got %d", l.QueryTimeout)
+	}
+	if l.TransactionTimeout < 0 {
+		return fmt.Errorf("transaction_timeout must not be negative, got %d", l.TransactionTimeout)
 	}
 	if l.MaxRows < 0 {
 		return fmt.Errorf("max_rows must not be negative, got %d", l.MaxRows)
@@ -324,6 +340,10 @@ type DatabaseConfig struct {
 	// Limits bound the work a single statement on this database may do,
 	// overriding the server-wide values.
 	Limits `yaml:",inline"`
+	// MaxConnections bounds the SQLite connections this database may have
+	// open at a time, overriding the server-wide value. Zero takes the
+	// server's, and zero there leaves it unbounded.
+	MaxConnections int `yaml:"max_connections"`
 	// Params are extra SQLite DSN query parameters appended to the
 	// "file:" URI used to open the database, e.g. mode=ro or
 	// immutable=true. They override the server-wide Config.Params. See the
@@ -566,6 +586,20 @@ func (p Params) validate() error {
 	return nil
 }
 
+// databaseConfig returns the configuration of a database with the
+// server-wide defaults filled in, so that whatever opens it reads one
+// complete set of values rather than consulting two.
+func (c *Config) databaseConfig(name string) (DatabaseConfig, bool) {
+	cfg, ok := c.Databases[name]
+	if !ok {
+		return DatabaseConfig{}, false
+	}
+	if cfg.MaxConnections == 0 {
+		cfg.MaxConnections = c.MaxConnections
+	}
+	return cfg, true
+}
+
 // LoadConfig reads and validates a YAML configuration file.
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -595,6 +629,9 @@ func (c *Config) Validate() error {
 	if err := c.Limits.validate(); err != nil {
 		return err
 	}
+	if c.MaxConnections < 0 {
+		return fmt.Errorf("max_connections must not be negative, got %d", c.MaxConnections)
+	}
 	if err := c.Extensions.validate(); err != nil {
 		return fmt.Errorf("extensions%w", err)
 	}
@@ -619,6 +656,10 @@ func (c *Config) Validate() error {
 		}
 		if err := db.Limits.validate(); err != nil {
 			return fmt.Errorf("databases.%s.%w", name, err)
+		}
+		if db.MaxConnections < 0 {
+			return fmt.Errorf("databases.%s.max_connections must not be negative, got %d",
+				name, db.MaxConnections)
 		}
 	}
 	// Validated last so that grants are checked against known-good databases.

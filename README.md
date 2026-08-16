@@ -79,6 +79,7 @@ A daemon shared by several clients needs a way to stop one statement from taking
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `query_timeout` | integer (seconds) | unset (unlimited) | Upper bound on how long a statement may run |
+| `transaction_timeout` | integer (seconds) | unset (unlimited) | How long a transaction may sit idle before it is rolled back |
 | `max_rows` | integer | unset (unlimited) | Upper bound on the rows in one result |
 | `max_response_bytes` | integer | 64 MiB | Upper bound on an encoded response body |
 
@@ -101,6 +102,43 @@ case errors.Is(err, lsqlited.ErrTimeout):
 	// the statement was interrupted
 case errors.Is(err, lsqlited.ErrTooManyRows), errors.Is(err, lsqlited.ErrResponseTooLarge):
 	// the result was too big to return
+}
+```
+
+### Connections
+
+Statements on one database run in parallel, each on its own SQLite connection: readers never block one another, and only writers take turns. `max_connections` bounds that pool, at the top level or under `databases.<name>`:
+
+```yaml
+max_connections: 16       # per database, for every database
+
+databases:
+  archive:
+    path: /var/lib/lsqlited/archive.sqlite3
+    params: mode=ro&immutable=true
+    max_connections: 32   # nothing writes here, so let readers have the machine
+```
+
+Omitted, the pool is unbounded. Either way the daemon keeps as many connections warm as the bound allows — a core's worth when there is none — because opening one reopens the file, reparses the schema and reloads every extension.
+
+A statement waiting for a free connection waits under its `query_timeout`, and an open transaction holds a connection until it commits or rolls back.
+
+### Transactions and Concurrent Writes
+
+SQLite allows any number of readers but only one writer at a time, and the daemon runs a transaction on one connection from beginning to end. Which lock a transaction takes, and when, is decided when it begins:
+
+```go
+tx, err := db.Begin()                                          // write: takes the lock now
+tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})     // read: runs alongside readers
+```
+
+A read-only transaction issues `BEGIN` and runs deferred, alongside every other reader; the daemon sets `query_only` on its connection, so a write inside one is refused rather than quietly promoting it to a writer.
+
+Outside a transaction each statement is its own, and SQLite applies it atomically; concurrent writers queue on the write lock for up to `_busy_timeout` (5s by default). When that runs out, the error carries the code `busy` and the driver matches `lsqlited.ErrBusy` — nothing is wrong with the statement, and repeating it is the remedy:
+
+```go
+if errors.Is(err, lsqlited.ErrBusy) {
+	// another connection held the lock; try again
 }
 ```
 
@@ -264,7 +302,7 @@ The SSL modes follow the familiar libpq semantics:
 | `verify-ca` | yes | yes | no |
 | `verify-full` | yes | yes | yes |
 
-Transactions (`db.Begin` / `db.BeginTx`), prepared statements, and context cancellation are supported. Query parameters are positional (`?`); named parameters are not supported. `Rows.ColumnTypes` reports the declared SQLite type of each column — `INTEGER`, `TEXT`, and so on, empty for an expression, a literal or an aggregate — including for a result with no rows.
+Transactions (`db.Begin` / `db.BeginTx`, including `sql.TxOptions{ReadOnly: true}`), prepared statements, and context cancellation are supported. Query parameters are positional (`?`); named parameters are not supported. `Rows.ColumnTypes` reports the declared SQLite type of each column — `INTEGER`, `TEXT`, and so on, empty for an expression, a literal or an aggregate — including for a result with no rows.
 
 `query_timeout` bounds a statement whose context carries no deadline of its own. When it does carry one, the remaining time is sent instead, so an ordinary `context.WithTimeout` bounds the work inside the daemon as well:
 
@@ -282,11 +320,11 @@ A request the server rejects comes back as a `*ServerError`, which carries the s
 var serverErr *lsqlited.ServerError
 if errors.As(err, &serverErr) {
 	fmt.Println(serverErr.Message) // "no such column: foo"
-	fmt.Println(serverErr.Code)    // "", "timeout", "too_many_rows", "response_too_large"
+	fmt.Println(serverErr.Code)    // "", "timeout", "too_many_rows", "response_too_large", "busy"
 }
 ```
 
-The classified ones also match a sentinel under `errors.Is`: `ErrTimeout`, `ErrTooManyRows`, and `ErrResponseTooLarge`. Everything else — dialing, I/O, protocol failures — surfaces as the underlying error.
+The classified ones also match a sentinel under `errors.Is`: `ErrTimeout`, `ErrTooManyRows`, `ErrResponseTooLarge`, and `ErrBusy`. Everything else — dialing, I/O, protocol failures — surfaces as the underlying error.
 
 ## Wire Protocol
 
@@ -315,11 +353,11 @@ A failed request answers with `error`, and with `code` when the reason is one th
 {"error": "result exceeds the row limit of 5000", "code": "too_many_rows"}
 ```
 
-The codes are `timeout`, `too_many_rows`, and `response_too_large`; `error` carries the underlying message with no prefix. A request that is canceled because the client hung up gets no answer at all, there being nobody left to answer.
+The codes are `timeout`, `too_many_rows`, `response_too_large`, and `busy`; `error` carries the underlying message with no prefix. A request that is canceled because the client hung up gets no answer at all, there being nobody left to answer.
 
 Request types are `ping`, `query`, `exec`, `begin`, `commit`, `rollback`, `auth_init`, and `auth`. Values are tagged (`null`, `int`, `float`, `bool`, `text`, `blob`, `time`) and transported as strings to preserve full `int64` precision; blobs are base64-encoded and times use RFC 3339.
 
-Each TCP connection is a session on the server. `begin` pins a dedicated SQLite transaction to the session until `commit` or `rollback`; a dropped connection rolls back any open transaction automatically.
+Each TCP connection is a session on the server. `begin` pins a SQLite connection to the session until `commit` or `rollback`, and `"read_only": true` asks for a deferred, read-only transaction instead of one that takes the write lock; a dropped connection rolls back any open transaction automatically.
 
 When the server has authentication enabled, a session must complete the `auth_init`/`auth` exchange before any other request type is accepted:
 
@@ -334,7 +372,7 @@ When the server has authentication enabled, a session must complete the `auth_in
 ## Limitations
 
 - Query results are fully buffered in memory before being sent, so very large result sets are subject to `max_response_bytes` and, above it, the 64 MiB message limit.
-- Limits bound one statement at a time; the daemon does not cap the number of statements running at once.
+- Limits bound one statement at a time; how many run at once is bounded only by `max_connections`.
 - Access control is per database, not per table or per statement: an account that may reach a database may read and write all of it. Use `params: mode=ro` to serve a database read-only to everyone.
 - Extensions are loaded from the configuration file only, and a change to the list takes effect when the daemon restarts.
 - Named query parameters and custom transaction isolation levels are not supported.

@@ -44,6 +44,12 @@
 // A request the server refuses on one of those grounds comes back as a
 // *ServerError, which matches ErrTimeout, ErrTooManyRows or
 // ErrResponseTooLarge under errors.Is.
+//
+// Transactions follow SQLite's locking rather than isolation levels. A
+// transaction started with sql.TxOptions{ReadOnly: true} runs alongside
+// other readers and may not write; any other takes the write lock when it
+// begins, which is what keeps a transaction that reads before it writes from
+// failing with ErrBusy halfway through.
 package lsqlited
 
 import (
@@ -383,6 +389,10 @@ var (
 	// ErrResponseTooLarge means the encoded result outgrew the response size
 	// limit the server enforces.
 	ErrResponseTooLarge = errors.New("lsqlited: result exceeds the response size limit")
+	// ErrBusy means another connection held a lock for longer than SQLite
+	// was willing to wait for it. The statement is fine; running it again,
+	// or the whole transaction again, is the remedy.
+	ErrBusy = errors.New("lsqlited: database is locked")
 )
 
 // ServerError is returned when the server rejects a request. Message holds
@@ -409,6 +419,8 @@ func (e *ServerError) Is(target error) bool {
 		return target == ErrTooManyRows
 	case protocol.CodeResponseTooLarge:
 		return target == ErrResponseTooLarge
+	case protocol.CodeBusy:
+		return target == ErrBusy
 	default:
 		return false
 	}
@@ -511,14 +523,19 @@ func (c *conn) Begin() (driver.Tx, error) {
 	return c.BeginTx(context.Background(), driver.TxOptions{})
 }
 
+// BeginTx starts a transaction. A read-only one runs alongside other
+// readers; any other takes SQLite's write lock as it begins, so that it
+// cannot fail later for having read before it wrote.
 func (c *conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
 	if opts.Isolation != driver.IsolationLevel(sql.LevelDefault) {
 		return nil, errors.New("lsqlited: custom isolation levels are not supported")
 	}
-	if opts.ReadOnly {
-		return nil, errors.New("lsqlited: read-only transactions are not supported")
-	}
-	if _, err := c.roundTrip(ctx, &protocol.Request{Type: protocol.TypeBegin}); err != nil {
+	_, err := c.roundTrip(ctx, &protocol.Request{
+		Type:      protocol.TypeBegin,
+		ReadOnly:  opts.ReadOnly,
+		TimeoutMS: c.timeoutMS(ctx),
+	})
+	if err != nil {
 		return nil, err
 	}
 	return &tx{c: c}, nil

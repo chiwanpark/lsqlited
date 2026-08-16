@@ -38,6 +38,24 @@ func startLimitedServer(t *testing.T, limits server.Limits) string {
 	return srv.Addr().String()
 }
 
+// startLimitedServerWithParams starts a server whose "test" database is
+// opened with the given SQLite parameters.
+func startLimitedServerWithParams(t *testing.T, params map[string]string) string {
+	t.Helper()
+	cfg := &server.Config{
+		Listen: server.ListenConfig{Host: "127.0.0.1", Port: 0},
+		Databases: map[string]server.DatabaseConfig{
+			"test": {Path: filepath.Join(t.TempDir(), "test.sqlite3"), Params: params},
+		},
+	}
+	srv := server.New(cfg)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("start server: %v", err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	return srv.Addr().String()
+}
+
 // series returns a query producing the numbers 1..n, one per row.
 func series(n int) string {
 	return fmt.Sprintf(`WITH RECURSIVE seq(n) AS (
