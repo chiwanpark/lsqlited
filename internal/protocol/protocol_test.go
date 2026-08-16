@@ -80,12 +80,10 @@ func TestMessageRoundTrip(t *testing.T) {
 	}
 }
 
-// TestCompatibility pins the two directions of the additive fields: a peer
-// that does not know them must not be able to tell, and a peer that does must
-// cope with their absence.
+// TestCompatibility pins the two directions of the additive fields: a peer that does not know them must not be able to
+// tell, and a peer that does must cope with their absence.
 func TestCompatibility(t *testing.T) {
-	// A request without limits is on the wire exactly as it was before they
-	// existed, so an older server sees nothing new.
+	// A request without limits is on the wire exactly as it was before they existed, so an older server sees nothing new.
 	req := Request{Type: TypeQuery, Database: "app", Query: "SELECT 1"}
 	encoded, err := json.Marshal(&req)
 	if err != nil {
@@ -96,8 +94,7 @@ func TestCompatibility(t *testing.T) {
 		t.Errorf("request = %s, want %s", encoded, want)
 	}
 
-	// A response from a server that predates the new fields decodes with
-	// them empty rather than failing.
+	// A response from a server that predates the new fields decodes with them empty rather than failing.
 	var resp Response
 	old := `{"columns":["v"],"rows":[[{"t":"text","v":"hello"}]]}`
 	if err := json.Unmarshal([]byte(old), &resp); err != nil {
@@ -110,8 +107,8 @@ func TestCompatibility(t *testing.T) {
 		t.Errorf("code = %q, want none", resp.Code)
 	}
 
-	// A request from a client that predates them leaves the limits unset,
-	// which is what "the client imposes no limit" looks like.
+	// A request from a client that predates them leaves the limits unset, which is what "the client imposes no limit"
+	// looks like.
 	var decoded Request
 	if err := json.Unmarshal([]byte(want), &decoded); err != nil {
 		t.Fatalf("unmarshal request: %v", err)
@@ -119,8 +116,7 @@ func TestCompatibility(t *testing.T) {
 	if decoded.TimeoutMS != 0 || decoded.MaxRows != 0 {
 		t.Errorf("limits = %d/%d, want 0/0", decoded.TimeoutMS, decoded.MaxRows)
 	}
-	// A begin from such a client is a write transaction, which is the
-	// safe reading of a request that does not say.
+	// A begin from such a client is a write transaction, which is the safe reading of a request that does not say.
 	if decoded.ReadOnly {
 		t.Error("read_only = true, want false")
 	}

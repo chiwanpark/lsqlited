@@ -134,8 +134,7 @@ func TestServerErrorIs(t *testing.T) {
 		}
 	}
 
-	// An error the server did not classify matches no sentinel, and its
-	// string form is the one callers have always seen.
+	// An error the server did not classify matches no sentinel, and its string form is the one callers have always seen.
 	plain := error(&ServerError{Message: "no such column: foo"})
 	for _, sentinel := range sentinels {
 		if errors.Is(plain, sentinel) {
@@ -156,8 +155,8 @@ func TestRowsColumnTypeDatabaseTypeName(t *testing.T) {
 		t.Errorf("type of column 1 = %q, want empty", got)
 	}
 
-	// A server that predates the field sends no types at all; the driver
-	// reports none rather than reading past the end of the slice.
+	// A server that predates the field sends no types at all; the driver reports none rather than reading past the end of
+	// the slice.
 	old := &rows{columns: []string{"id", "name"}}
 	for i := -1; i < 3; i++ {
 		if got := old.ColumnTypeDatabaseTypeName(i); got != "" {

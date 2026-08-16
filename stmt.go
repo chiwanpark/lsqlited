@@ -79,9 +79,8 @@ var (
 func (r *rows) Columns() []string { return r.columns }
 func (r *rows) Close() error      { return nil }
 
-// ColumnTypeDatabaseTypeName returns the declared SQLite type of a column. It
-// is empty for a column without one — an expression, a literal or an aggregate
-// — and for every column when the server predates the field, which is why the
+// ColumnTypeDatabaseTypeName returns the declared SQLite type of a column. It is empty for a column without one — an
+// expression, a literal or an aggregate — and for every column when the server predates the field, which is why the
 // slice is bounds-checked rather than indexed directly.
 func (r *rows) ColumnTypeDatabaseTypeName(i int) string {
 	if i < 0 || i >= len(r.columnTypes) {

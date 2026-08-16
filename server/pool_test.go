@@ -9,17 +9,15 @@ import (
 	"time"
 )
 
-// busy is a statement that spends a fixed amount of CPU without touching any
-// table, so several of them running at once say something about parallelism
-// rather than about the page cache.
+// busy is a statement that spends a fixed amount of CPU without touching any table, so several of them running at once
+// say something about parallelism rather than about the page cache.
 const busy = `WITH RECURSIVE spin(x) AS (
 	SELECT 1 UNION ALL SELECT x + 1 FROM spin WHERE x < 2000000
 ) SELECT count(*) FROM spin`
 
-// TestParallelReads checks that statements on one database run at the same
-// time. SQLite lets readers work in parallel on separate connections, and the
-// daemon gives every statement one, so the wall time of several of them
-// together must stay well under their sum.
+// TestParallelReads checks that statements on one database run at the same time. SQLite lets readers work in parallel
+// on separate connections, and the daemon gives every statement one, so the wall time of several of them together must
+// stay well under their sum.
 func TestParallelReads(t *testing.T) {
 	const workers = 4
 	if runtime.NumCPU() < workers {
@@ -63,19 +61,16 @@ func TestParallelReads(t *testing.T) {
 	}
 	parallel := time.Since(start)
 
-	// Run sequentially they would take workers × single. Half of that is
-	// far more slack than a machine with the cores for it needs, and still
-	// nowhere near what a serialized database would take.
+	// Run sequentially they would take workers × single. Half of that is far more slack than a machine with the cores for
+	// it needs, and still nowhere near what a serialized database would take.
 	if budget := time.Duration(workers) * single / 2; parallel > budget {
-		t.Errorf("%d parallel queries took %s, want under %s (one takes %s)",
-			workers, parallel, budget, single)
+		t.Errorf("%d parallel queries took %s, want under %s (one takes %s)", workers, parallel, budget, single)
 	}
 }
 
-// TestPoolReusesConnections checks that a busy database reuses its
-// connections instead of opening one per statement. Every open costs a file,
-// a schema parse and a round of extension loading, so churn is the thing that
-// makes a database look slow under concurrency.
+// TestPoolReusesConnections checks that a busy database reuses its connections instead of opening one per statement.
+// Every open costs a file, a schema parse and a round of extension loading, so churn is the thing that makes a database
+// look slow under concurrency.
 func TestPoolReusesConnections(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.sqlite3")
 	seed, err := openSQLite(path, &Config{})
@@ -116,8 +111,8 @@ func TestPoolReusesConnections(t *testing.T) {
 	}
 
 	stats := db.Stats()
-	// A connection is only closed for want of an idle slot when the pool
-	// keeps fewer than it opens, which is exactly what configurePool avoids.
+	// A connection is only closed for want of an idle slot when the pool keeps fewer than it opens, which is exactly what
+	// configurePool avoids.
 	if stats.MaxIdleClosed != 0 {
 		t.Errorf("%d connections were closed for want of an idle slot, want none", stats.MaxIdleClosed)
 	}
@@ -158,9 +153,8 @@ func TestConfigurePool(t *testing.T) {
 			if got := db.Stats().MaxOpenConnections; got != tc.wantOpen {
 				t.Errorf("MaxOpenConnections = %d, want %d", got, tc.wantOpen)
 			}
-			// The idle count is not reported by Stats, so it is observed
-			// instead: with the pool warm, handing that many connections
-			// back must not close any of them.
+			// The idle count is not reported by Stats, so it is observed instead: with the pool warm, handing that many
+			// connections back must not close any of them.
 			conns := make([]*sql.Conn, 0, tc.wantIdle)
 			for i := 0; i < tc.wantIdle; i++ {
 				c, err := db.Conn(t.Context())

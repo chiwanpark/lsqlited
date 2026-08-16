@@ -71,8 +71,7 @@ func TestTLSServerConfigMissingFiles(t *testing.T) {
 	}
 }
 
-// TestLoadConfigTLS checks that the section decodes and that malformed
-// sections are refused at load time.
+// TestLoadConfigTLS checks that the section decodes and that malformed sections are refused at load time.
 func TestLoadConfigTLS(t *testing.T) {
 	path := writeConfig(t, `
 listen: {port: 7890}
@@ -138,8 +137,8 @@ databases:
 	}
 }
 
-// TestWithTLSConfigOverridesFile makes sure an embedding caller can supply
-// its own certificates without touching the configuration file.
+// TestWithTLSConfigOverridesFile makes sure an embedding caller can supply its own certificates without touching the
+// configuration file.
 func TestWithTLSConfigOverridesFile(t *testing.T) {
 	supplied := &tls.Config{MinVersion: tls.VersionTLS13}
 	srv := New(&Config{
@@ -147,8 +146,8 @@ func TestWithTLSConfigOverridesFile(t *testing.T) {
 		TLS:       TLSConfig{Cert: "/nonexistent/server.crt", Key: "/nonexistent/server.key"},
 		Databases: map[string]string{"app": "/tmp/app.sqlite3"},
 	}, WithTLSConfig(supplied))
-	// initTLS must leave the supplied config alone rather than trying to
-	// read the (missing) files named in the configuration.
+	// initTLS must leave the supplied config alone rather than trying to read the (missing) files named in the
+	// configuration.
 	if err := srv.initTLS(); err != nil {
 		t.Fatalf("initTLS: %v", err)
 	}

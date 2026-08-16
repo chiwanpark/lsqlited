@@ -8,10 +8,8 @@ import (
 	"testing"
 )
 
-// TestSaltPasswordVector pins the key derivation to the published
-// PBKDF2-HMAC-SHA256 test vector. crypto/pbkdf2 has its own test suite, so
-// this exists to catch a miswired call: the wrong hash, or arguments in the
-// wrong order.
+// TestSaltPasswordVector pins the key derivation to the published PBKDF2-HMAC-SHA256 test vector. crypto/pbkdf2 has its
+// own test suite, so this exists to catch a miswired call: the wrong hash, or arguments in the wrong order.
 func TestSaltPasswordVector(t *testing.T) {
 	cases := []struct {
 		password   string
@@ -38,9 +36,8 @@ func TestSaltPasswordVector(t *testing.T) {
 	}
 }
 
-// TestSaltLengthMeetsFIPSFloor pins the invariant that keeps SaltPassword
-// from failing in practice: every salt we generate or accept is at least the
-// 128 bits crypto/pbkdf2 requires under GODEBUG=fips140=only.
+// TestSaltLengthMeetsFIPSFloor pins the invariant that keeps SaltPassword from failing in practice: every salt we
+// generate or accept is at least the 128 bits crypto/pbkdf2 requires under GODEBUG=fips140=only.
 func TestSaltLengthMeetsFIPSFloor(t *testing.T) {
 	const fipsFloor = 128 / 8
 	if MinSaltLen < fipsFloor {
@@ -58,8 +55,7 @@ func TestSaltLengthMeetsFIPSFloor(t *testing.T) {
 	}
 }
 
-// TestDeriveVerifierRFC7677 checks the key schedule against the
-// SCRAM-SHA-256 test vector from RFC 7677 section 3.
+// TestDeriveVerifierRFC7677 checks the key schedule against the SCRAM-SHA-256 test vector from RFC 7677 section 3.
 func TestDeriveVerifierRFC7677(t *testing.T) {
 	salt, err := base64.StdEncoding.DecodeString("W22ZaJ0SNY7soEsUEjb6gQ==")
 	if err != nil {
@@ -80,8 +76,8 @@ func TestDeriveVerifierRFC7677(t *testing.T) {
 	}
 }
 
-// handshake runs a full exchange and reports whether the client proof was
-// accepted and whether the server signature matched.
+// handshake runs a full exchange and reports whether the client proof was accepted and whether the server signature
+// matched.
 func handshake(t *testing.T, v *Verifier, user, password string) (accepted, serverOK bool) {
 	t.Helper()
 	clientNonce, err := Nonce()
@@ -127,8 +123,8 @@ func TestHandshakeFailsWithWrongPassword(t *testing.T) {
 	}
 }
 
-// TestProofIsBoundToNonces documents the replay protection: a proof
-// captured from one handshake is worthless in another.
+// TestProofIsBoundToNonces documents the replay protection: a proof captured from one handshake is worthless in
+// another.
 func TestProofIsBoundToNonces(t *testing.T) {
 	v, err := NewVerifier("s3cret", MinIterations)
 	if err != nil {
@@ -150,8 +146,8 @@ func TestProofIsBoundToNonces(t *testing.T) {
 	}
 }
 
-// TestAuthMessageCoversChallengeParameters ensures a man in the middle
-// cannot alter the advertised salt or iteration count unnoticed.
+// TestAuthMessageCoversChallengeParameters ensures a man in the middle cannot alter the advertised salt or iteration
+// count unnoticed.
 func TestAuthMessageCoversChallengeParameters(t *testing.T) {
 	clientNonce, _ := Nonce()
 	serverNonce, _ := Nonce()
@@ -171,8 +167,7 @@ func TestAuthMessageCoversChallengeParameters(t *testing.T) {
 	}
 }
 
-// TestAuthMessageResistsSeparatorInjection ensures a crafted user name
-// cannot forge the remainder of the message.
+// TestAuthMessageResistsSeparatorInjection ensures a crafted user name cannot forge the remainder of the message.
 func TestAuthMessageResistsSeparatorInjection(t *testing.T) {
 	nonce := bytes.Repeat([]byte{1}, NonceLen)
 	salt := []byte("0123456789abcdef")
@@ -236,8 +231,7 @@ func TestParseVerifierRejectsMalformedInput(t *testing.T) {
 	}
 }
 
-// TestDecoyVerifier checks that challenges for unknown users are stable and
-// never accept a proof.
+// TestDecoyVerifier checks that challenges for unknown users are stable and never accept a proof.
 func TestDecoyVerifier(t *testing.T) {
 	secret, err := Secret()
 	if err != nil {

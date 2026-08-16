@@ -1,6 +1,5 @@
-// Package lsqlited provides a database/sql driver for the lsqlited daemon, a
-// lightweight TCP server for SQLite databases. Import it for its side effects
-// and open a DSN of the form
+// Package lsqlited provides a database/sql driver for the lsqlited daemon, a lightweight TCP server for SQLite
+// databases. Import it for its side effects and open a DSN of the form
 //
 //	lsqlited://[user:password@]host:port/database[?param=value&...]
 //
@@ -58,8 +57,8 @@ type connector struct {
 	driver *Driver
 	cfg    *dsnConfig
 
-	// mu guards the memoized salted password. Deriving it costs a PBKDF2 run,
-	// so connections that see the same salt and iteration count reuse it.
+	// mu guards the memoized salted password. Deriving it costs a PBKDF2 run, so connections that see the same salt and
+	// iteration count reuse it.
 	mu         sync.Mutex
 	salt       []byte
 	iterations int
@@ -94,10 +93,9 @@ func (c *connector) Connect(ctx context.Context) (driver.Conn, error) {
 	return cn, nil
 }
 
-// tlsHandshake upgrades a freshly dialed connection to TLS, and is a no-op
-// when ssl_mode is disable. dial_timeout bounds the handshake too, since a
-// peer that stalls halfway through it is as unreachable as one that never
-// accepts the connection.
+// tlsHandshake upgrades a freshly dialed connection to TLS, and is a no-op when ssl_mode is disable. dial_timeout
+// bounds the handshake too, since a peer that stalls halfway through it is as unreachable as one that never accepts the
+// connection.
 func (c *connector) tlsHandshake(ctx context.Context, nc net.Conn) (net.Conn, error) {
 	if c.cfg.tls == nil {
 		return nc, nil

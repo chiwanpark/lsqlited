@@ -17,9 +17,8 @@ func versionOf(t *testing.T, db *sql.DB) string {
 	return got
 }
 
-// TestOpenSQLiteRegistersVersion checks that lsqlited_version() is available
-// on every database the daemon opens, whether or not it loads extensions,
-// since the two go through different drivers.
+// TestOpenSQLiteRegistersVersion checks that lsqlited_version() is available on every database the daemon opens,
+// whether or not it loads extensions, since the two go through different drivers.
 func TestOpenSQLiteRegistersVersion(t *testing.T) {
 	want := version.String()
 
@@ -35,8 +34,7 @@ func TestOpenSQLiteRegistersVersion(t *testing.T) {
 		}
 	})
 
-	// A database with extensions is opened through a derived driver, whose
-	// connect hook also has to register the function.
+	// A database with extensions is opened through a derived driver, whose connect hook also has to register the function.
 	t.Run("with extensions", func(t *testing.T) {
 		lib := buildExtension(t, "sqlite3_extension_init", "lsqlited_answer", 42)
 		db, err := openSQLite(testPath(t), &Config{Extensions: Extensions{{Path: lib}}})
@@ -48,8 +46,7 @@ func TestOpenSQLiteRegistersVersion(t *testing.T) {
 		if got := versionOf(t, db); got != want {
 			t.Errorf("%s() = %q, want %q", version.FuncName, got, want)
 		}
-		// The extension is still loaded, so the version function did not
-		// take its place.
+		// The extension is still loaded, so the version function did not take its place.
 		if got := answerOf(t, db, "lsqlited_answer"); got != 42 {
 			t.Errorf("lsqlited_answer() = %d, want 42", got)
 		}

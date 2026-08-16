@@ -1,5 +1,5 @@
-// Package server implements the lsqlited daemon: a TCP server that serves
-// SQLite databases using the lsqlited wire protocol.
+// Package server implements the lsqlited daemon: a TCP server that serves SQLite databases using the lsqlited wire
+// protocol.
 package server
 
 import (
@@ -21,8 +21,8 @@ import (
 	"github.com/chiwanpark/lsqlited/internal/protocol"
 )
 
-// tlsHandshakeTimeout bounds how long a client may take over the handshake,
-// so that a peer that connects and goes quiet cannot pin a goroutine.
+// tlsHandshakeTimeout bounds how long a client may take over the handshake, so that a peer that connects and goes quiet
+// cannot pin a goroutine.
 const tlsHandshakeTimeout = 15 * time.Second
 
 // Option customizes a Server.
@@ -33,9 +33,8 @@ func WithLogger(logger *slog.Logger) Option {
 	return func(s *Server) { s.logger = logger }
 }
 
-// WithTLSConfig serves TLS using the given configuration, overriding the
-// `tls` section of the configuration file. It is meant for callers that embed
-// the server and manage certificates themselves.
+// WithTLSConfig serves TLS using the given configuration, overriding the `tls` section of the configuration file. It is
+// meant for callers that embed the server and manage certificates themselves.
 func WithTLSConfig(cfg *tls.Config) Option {
 	return func(s *Server) { s.tlsConfig = cfg }
 }
@@ -48,8 +47,8 @@ type Server struct {
 	// tlsConfig is nil when the server serves plaintext TCP.
 	tlsConfig *tls.Config
 
-	// accounts, authSecret and decoyIterations are written once by Start,
-	// before any connection is accepted, and only read afterwards.
+	// accounts, authSecret and decoyIterations are written once by Start, before any connection is accepted, and only read
+	// afterwards.
 	accounts        map[string]*Account
 	authSecret      []byte
 	decoyIterations int
@@ -77,8 +76,7 @@ func New(cfg *Config, opts ...Option) *Server {
 	return s
 }
 
-// Start binds the listener and begins accepting connections in the
-// background. Use Close to shut the server down.
+// Start binds the listener and begins accepting connections in the background. Use Close to shut the server down.
 func (s *Server) Start() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -100,8 +98,7 @@ func (s *Server) Start() error {
 		return fmt.Errorf("server: listen on %s: %w", addr, err)
 	}
 	if s.tlsConfig != nil {
-		// Wrapping the listener keeps the rest of the server on a plain
-		// net.Conn: TLS is entirely a transport concern here.
+		// Wrapping the listener keeps the rest of the server on a plain net.Conn: TLS is entirely a transport concern here.
 		ln = tls.NewListener(ln, s.tlsConfig)
 	}
 	s.ln = ln
@@ -110,8 +107,8 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// initAuth derives the credentials of every account and the per-process
-// secret used to fabricate challenges for unknown users.
+// initAuth derives the credentials of every account and the per-process secret used to fabricate challenges for unknown
+// users.
 func (s *Server) initAuth() error {
 	accounts, err := s.cfg.Auth.Accounts()
 	if err != nil {
@@ -127,8 +124,8 @@ func (s *Server) initAuth() error {
 	return nil
 }
 
-// initTLS derives the listener's TLS configuration from the configuration
-// file, unless WithTLSConfig already supplied one.
+// initTLS derives the listener's TLS configuration from the configuration file, unless WithTLSConfig already supplied
+// one.
 func (s *Server) initTLS() error {
 	if s.tlsConfig != nil {
 		return nil
@@ -144,16 +141,15 @@ func (s *Server) initTLS() error {
 // authEnabled reports whether clients must authenticate first.
 func (s *Server) authEnabled() bool { return len(s.accounts) > 0 }
 
-// TLSEnabled reports whether the server encrypts its connections. It is only
-// meaningful once Start has returned.
+// TLSEnabled reports whether the server encrypts its connections. It is only meaningful once Start has returned.
 func (s *Server) TLSEnabled() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.tlsConfig != nil
 }
 
-// account returns the account of user. Unknown users get a stable decoy so
-// that the challenge does not reveal whether the account exists.
+// account returns the account of user. Unknown users get a stable decoy so that the challenge does not reveal whether
+// the account exists.
 func (s *Server) account(user string) (*Account, bool) {
 	if a, ok := s.accounts[user]; ok {
 		return a, true
@@ -172,8 +168,8 @@ func (s *Server) Addr() net.Addr {
 	return s.ln.Addr()
 }
 
-// Close stops accepting connections, terminates active ones, waits for
-// handlers to finish, and closes all open databases.
+// Close stops accepting connections, terminates active ones, waits for handlers to finish, and closes all open
+// databases.
 func (s *Server) Close() error {
 	s.mu.Lock()
 	if s.closed {
@@ -229,8 +225,7 @@ func (s *Server) getDB(name string) (*sql.DB, error) {
 		return nil, fmt.Errorf("open database %q: %w", name, err)
 	}
 	if len(s.cfg.Extensions) > 0 {
-		s.logger.Debug("loaded sqlite extensions", "database", name,
-			"extensions", s.cfg.Extensions.strings())
+		s.logger.Debug("loaded sqlite extensions", "database", name, "extensions", s.cfg.Extensions.strings())
 	}
 	s.dbs[name] = db
 	return db, nil
@@ -277,17 +272,15 @@ func (s *Server) handleConn(conn net.Conn) {
 		return
 	}
 
-	// Requests are read through a buffered reader so that a statement can be
-	// watched for the peer hanging up: Peek blocks without consuming, which
-	// leaves a pipelined request in place for the loop below.
+	// Requests are read through a buffered reader so that a statement can be watched for the peer hanging up: Peek blocks
+	// without consuming, which leaves a pipelined request in place for the loop below.
 	br := bufio.NewReader(conn)
 	sess := &session{srv: s, logger: logger, peer: &peer{conn: conn, br: br}}
 	defer sess.cleanup()
 
 	for {
-		// A transaction holds the write lock, so a session that abandons one
-		// is not waited for indefinitely: the read deadline ends the session
-		// and the deferred cleanup rolls the transaction back.
+		// A transaction holds the write lock, so a session that abandons one is not waited for indefinitely: the read
+		// deadline ends the session and the deferred cleanup rolls the transaction back.
 		if err := conn.SetReadDeadline(sess.idleDeadline()); err != nil {
 			return
 		}
@@ -295,8 +288,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		if err := protocol.ReadMessage(br, &req); err != nil {
 			switch {
 			case sess.tx != nil && os.IsTimeout(err):
-				logger.Warn("rolling back a transaction left idle",
-					"idle_timeout", sess.tx.idleTimeout)
+				logger.Warn("rolling back a transaction left idle", "idle_timeout", sess.tx.idleTimeout)
 			case err != io.EOF && !errors.Is(err, net.ErrClosed):
 				logger.Debug("read request failed", "error", err)
 			}
@@ -307,8 +299,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		}
 		resp := sess.handle(ctx, &req)
 		if resp == nil {
-			// The client vanished while its statement ran, so there is nobody
-			// left to answer.
+			// The client vanished while its statement ran, so there is nobody left to answer.
 			logger.Debug("client disconnected during statement")
 			return
 		}
@@ -321,9 +312,8 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 }
 
-// writeResponse sends resp, substituting a classified error when the body
-// does not fit in a protocol frame. WriteMessage rejects such a body before
-// writing any of it, so the substitute reaches the client on an intact
+// writeResponse sends resp, substituting a classified error when the body does not fit in a protocol frame.
+// WriteMessage rejects such a body before writing any of it, so the substitute reaches the client on an intact
 // connection instead of the connection simply dropping.
 func writeResponse(w io.Writer, resp *protocol.Response) error {
 	err := protocol.WriteMessage(w, resp)
@@ -334,10 +324,9 @@ func writeResponse(w io.Writer, resp *protocol.Response) error {
 	return err
 }
 
-// tlsHandshake completes the TLS handshake, if any, under a deadline. Doing it
-// here rather than letting the first Read trigger it lets the server log a
-// failure and bound how long it waits. It reports whether the connection is
-// ready to carry requests.
+// tlsHandshake completes the TLS handshake, if any, under a deadline. Doing it here rather than letting the first Read
+// trigger it lets the server log a failure and bound how long it waits. It reports whether the connection is ready to
+// carry requests.
 func tlsHandshake(ctx context.Context, conn net.Conn, logger *slog.Logger) bool {
 	tc, ok := conn.(*tls.Conn)
 	if !ok {

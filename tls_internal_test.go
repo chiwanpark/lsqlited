@@ -66,8 +66,8 @@ func TestParseSSLOptionsInvalid(t *testing.T) {
 	}
 }
 
-// TestParseSSLOptionsEmptyModeIsNotDefaulted guards the subtle case of an
-// explicitly empty ssl_mode, which must not be mistaken for an absent one.
+// TestParseSSLOptionsEmptyModeIsNotDefaulted guards the subtle case of an explicitly empty ssl_mode, which must not be
+// mistaken for an absent one.
 func TestParseSSLOptionsEmptyModeIsNotDefaulted(t *testing.T) {
 	if _, err := parseSSLOptions(url.Values{"ssl_mode": []string{""}}); err == nil {
 		t.Error("expected error for an explicitly empty ssl_mode")
@@ -180,8 +180,7 @@ func TestParseDSNTLS(t *testing.T) {
 	}
 }
 
-// TestParseDSNUnknownParams makes sure a misspelled parameter is an error
-// rather than a silent downgrade to cleartext.
+// TestParseDSNUnknownParams makes sure a misspelled parameter is an error rather than a silent downgrade to cleartext.
 func TestParseDSNUnknownParams(t *testing.T) {
 	cases := []string{
 		"lsqlited://127.0.0.1:7890/app?sslmode=require",

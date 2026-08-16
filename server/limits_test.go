@@ -12,8 +12,8 @@ import (
 	"github.com/chiwanpark/lsqlited/internal/protocol"
 )
 
-// forever is a statement that never finishes on its own, so a test that gets
-// an answer from it has proof that something interrupted it.
+// forever is a statement that never finishes on its own, so a test that gets an answer from it has proof that something
+// interrupted it.
 const forever = `WITH RECURSIVE spin(x) AS (
 	SELECT 1 UNION ALL SELECT x + 1 FROM spin
 ) SELECT count(*) FROM spin`
@@ -66,8 +66,7 @@ func TestServerLimitsFromRequest(t *testing.T) {
 			wantRows:    5000,
 		},
 		{
-			// The configuration is written in whole seconds, but a client
-			// may ask for something finer.
+			// The configuration is written in whole seconds, but a client may ask for something finer.
 			name:        "a tighter request wins",
 			req:         protocol.Request{Database: "app", TimeoutMS: 1500, MaxRows: 100},
 			wantTimeout: 1500 * time.Millisecond,
@@ -99,9 +98,8 @@ func TestServerLimitsFromRequest(t *testing.T) {
 	}
 }
 
-// TestWriteResponseTooLarge checks that a result which does not fit in a
-// protocol frame reaches the client as a classified error rather than as a
-// dropped connection.
+// TestWriteResponseTooLarge checks that a result which does not fit in a protocol frame reaches the client as a
+// classified error rather than as a dropped connection.
 func TestWriteResponseTooLarge(t *testing.T) {
 	if testing.Short() {
 		t.Skip("allocates more than 64 MiB")
@@ -165,8 +163,7 @@ func TestPeerWatchKeepsPipelinedRequest(t *testing.T) {
 	p := &peer{conn: server, br: bufio.NewReader(server)}
 	stop := p.watch(cancel)
 
-	// A client that pipelines the next request behind the running one must
-	// not lose it: Peek looks without consuming.
+	// A client that pipelines the next request behind the running one must not lose it: Peek looks without consuming.
 	go client.Write([]byte("hello"))
 
 	if stop() {
@@ -193,8 +190,7 @@ func TestPeerWatchLeavesConnectionUsable(t *testing.T) {
 	defer cancel()
 	p := &peer{conn: server, br: bufio.NewReader(server)}
 
-	// Stopping the watcher unblocks its read with a deadline; the next read
-	// must not inherit it.
+	// Stopping the watcher unblocks its read with a deadline; the next read must not inherit it.
 	if p.watch(cancel)() {
 		t.Fatal("stop() = true, want false with the peer still connected")
 	}
@@ -208,8 +204,8 @@ func TestPeerWatchLeavesConnectionUsable(t *testing.T) {
 	}
 }
 
-// TestDisconnectInterruptsStatement checks that a client that hangs up while
-// its statement runs takes the statement down with it.
+// TestDisconnectInterruptsStatement checks that a client that hangs up while its statement runs takes the statement
+// down with it.
 func TestDisconnectInterruptsStatement(t *testing.T) {
 	srv, addr := startTestServer(t, &Config{})
 
@@ -237,8 +233,8 @@ func TestDisconnectInterruptsStatement(t *testing.T) {
 	}
 }
 
-// TestStatementTimeoutInterrupts checks the same for a statement that runs
-// out of time: the answer arrives, and it is classified.
+// TestStatementTimeoutInterrupts checks the same for a statement that runs out of time: the answer arrives, and it is
+// classified.
 func TestStatementTimeoutInterrupts(t *testing.T) {
 	_, addr := startTestServer(t, &Config{Limits: Limits{QueryTimeout: 1}})
 

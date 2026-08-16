@@ -7,19 +7,17 @@ import (
 	"github.com/chiwanpark/lsqlited/internal/tlsutil"
 )
 
-// TLSConfig configures transport security for the listener. Leaving the
-// section out serves the wire protocol over plaintext TCP.
+// TLSConfig configures transport security for the listener. Leaving the section out serves the wire protocol over
+// plaintext TCP.
 type TLSConfig struct {
-	// Cert is a PEM certificate, with any intermediates appended so that
-	// clients can build the chain. Key is the matching private key.
+	// Cert is a PEM certificate, with any intermediates appended so that clients can build the chain. Key is the matching
+	// private key.
 	Cert string `yaml:"cert"`
 	Key  string `yaml:"key"`
-	// ClientCA is a PEM bundle of authorities allowed to sign client
-	// certificates. Setting it turns on mutual TLS, which authenticates the
-	// connection, not the account; accounts are configured under `auth`.
+	// ClientCA is a PEM bundle of authorities allowed to sign client certificates. Setting it turns on mutual TLS, which
+	// authenticates the connection, not the account; accounts are configured under `auth`.
 	ClientCA string `yaml:"client_ca"`
-	// MinVersion is the lowest TLS version to negotiate, "1.2" (default) or
-	// "1.3".
+	// MinVersion is the lowest TLS version to negotiate, "1.2" (default) or "1.3".
 	MinVersion string `yaml:"min_version"`
 }
 
@@ -31,8 +29,8 @@ func (t TLSConfig) configured() bool {
 	return t.Enabled() || t.ClientCA != "" || t.MinVersion != ""
 }
 
-// validate checks the shape of the section. The certificate files are read by
-// Server.Start, not here, so that Validate stays free of I/O.
+// validate checks the shape of the section. The certificate files are read by Server.Start, not here, so that Validate
+// stays free of I/O.
 func (t TLSConfig) validate() error {
 	if !t.configured() {
 		return nil
@@ -51,8 +49,8 @@ func (t TLSConfig) validate() error {
 	return nil
 }
 
-// serverConfig loads the key pair and builds the crypto/tls configuration
-// for the listener. It returns nil when TLS is disabled.
+// serverConfig loads the key pair and builds the crypto/tls configuration for the listener. It returns nil when TLS is
+// disabled.
 func (t TLSConfig) serverConfig() (*tls.Config, error) {
 	if !t.Enabled() {
 		return nil, nil

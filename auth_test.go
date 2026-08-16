@@ -20,8 +20,7 @@ import (
 	"github.com/chiwanpark/lsqlited/server"
 )
 
-// testIterations keeps the key derivation cheap; production defaults come
-// from auth.DefaultIterations.
+// testIterations keeps the key derivation cheap; production defaults come from auth.DefaultIterations.
 const testIterations = auth.MinIterations
 
 // verifierFor builds the credential an account is configured with.
@@ -50,13 +49,11 @@ func authDSN(addr, user, password string) string {
 }
 
 func authDatabaseDSN(addr, user, password, database string) string {
-	return fmt.Sprintf("lsqlited://%s@%s/%s",
-		url.UserPassword(user, password).String(), addr, database)
+	return fmt.Sprintf("lsqlited://%s@%s/%s", url.UserPassword(user, password).String(), addr, database)
 }
 
-// startGrantServer serves three databases and three accounts with different
-// reach: root is unrestricted, alice is limited to two databases, and
-// suspended is granted none.
+// startGrantServer serves three databases and three accounts with different reach: root is unrestricted, alice is
+// limited to two databases, and suspended is granted none.
 func startGrantServer(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -116,8 +113,7 @@ func TestPerDatabaseGrants(t *testing.T) {
 	}
 }
 
-// TestGrantsCoverEveryRequestType checks that authorization is enforced on
-// each request, not only on the first one.
+// TestGrantsCoverEveryRequestType checks that authorization is enforced on each request, not only on the first one.
 func TestGrantsCoverEveryRequestType(t *testing.T) {
 	addr := startGrantServer(t)
 	db := openDSN(t, authDatabaseDSN(addr, "alice", "s3cret", "archive"))
@@ -133,9 +129,8 @@ func TestGrantsCoverEveryRequestType(t *testing.T) {
 	}
 }
 
-// TestGrantsAreNotBoundToTheLoginDatabase checks that a hand-written client
-// cannot authenticate while naming a permitted database and then reach a
-// forbidden one on the same connection.
+// TestGrantsAreNotBoundToTheLoginDatabase checks that a hand-written client cannot authenticate while naming a
+// permitted database and then reach a forbidden one on the same connection.
 func TestGrantsAreNotBoundToTheLoginDatabase(t *testing.T) {
 	addr := startGrantServer(t)
 	conn, err := net.Dial("tcp", addr)
@@ -268,16 +263,14 @@ func TestAuthFailure(t *testing.T) {
 				t.Errorf("error = %v, want authentication failed", err)
 			}
 			// The failure must not reveal whether the account exists.
-			if strings.Contains(err.Error(), "unknown user") ||
-				strings.Contains(err.Error(), "no such user") {
+			if strings.Contains(err.Error(), "unknown user") || strings.Contains(err.Error(), "no such user") {
 				t.Errorf("error leaks account existence: %v", err)
 			}
 		})
 	}
 }
 
-// TestAuthRequired checks that a server with configured users rejects a
-// client that never authenticates.
+// TestAuthRequired checks that a server with configured users rejects a client that never authenticates.
 func TestAuthRequired(t *testing.T) {
 	addr := startAuthServer(t)
 	db := openDB(t, addr, "test")
@@ -287,9 +280,8 @@ func TestAuthRequired(t *testing.T) {
 	}
 }
 
-// TestAuthNotEnabled checks that credentials aimed at a server without
-// authentication fail loudly rather than silently opening an unauthenticated
-// session.
+// TestAuthNotEnabled checks that credentials aimed at a server without authentication fail loudly rather than silently
+// opening an unauthenticated session.
 func TestAuthNotEnabled(t *testing.T) {
 	addr := startServer(t)
 	db := openDSN(t, authDSN(addr, "alice", "s3cret"))
@@ -299,8 +291,8 @@ func TestAuthNotEnabled(t *testing.T) {
 	}
 }
 
-// TestPasswordNeverSentOverTheWire is the core security property: a proxy
-// recording every byte of the handshake must never observe the password.
+// TestPasswordNeverSentOverTheWire is the core security property: a proxy recording every byte of the handshake must
+// never observe the password.
 func TestPasswordNeverSentOverTheWire(t *testing.T) {
 	const password = "correct-horse-battery-staple"
 	addr := serve(t, &server.Config{Auth: server.AuthConfig{
@@ -331,9 +323,8 @@ func TestPasswordNeverSentOverTheWire(t *testing.T) {
 	}
 }
 
-// TestReplayedProofIsRejected records a successful handshake and replays the
-// captured proof on a fresh connection. The server's per-connection nonce
-// must make it useless.
+// TestReplayedProofIsRejected records a successful handshake and replays the captured proof on a fresh connection. The
+// server's per-connection nonce must make it useless.
 func TestReplayedProofIsRejected(t *testing.T) {
 	addr := startAuthServer(t)
 
@@ -395,9 +386,8 @@ func TestReplayedProofIsRejected(t *testing.T) {
 	}
 }
 
-// TestUnknownUserChallengeLooksReal checks that the challenge issued for a
-// missing account is indistinguishable in shape from a real one and stable
-// across attempts, so it cannot be used to enumerate accounts.
+// TestUnknownUserChallengeLooksReal checks that the challenge issued for a missing account is indistinguishable in
+// shape from a real one and stable across attempts, so it cannot be used to enumerate accounts.
 func TestUnknownUserChallengeLooksReal(t *testing.T) {
 	addr := startAuthServer(t)
 	known := requestChallenge(t, addr, "alice")
@@ -418,9 +408,8 @@ func TestUnknownUserChallengeLooksReal(t *testing.T) {
 	}
 }
 
-// TestFailedAuthDoesNotOpenSession checks that a rejected proof leaves the
-// connection unauthenticated and that a fresh challenge is required for a
-// second attempt.
+// TestFailedAuthDoesNotOpenSession checks that a rejected proof leaves the connection unauthenticated and that a fresh
+// challenge is required for a second attempt.
 func TestFailedAuthDoesNotOpenSession(t *testing.T) {
 	addr := startAuthServer(t)
 	conn, err := net.Dial("tcp", addr)
@@ -483,9 +472,8 @@ func TestFailedAuthDoesNotOpenSession(t *testing.T) {
 	}
 }
 
-// TestRogueServerIsDetected checks the mutual half of the handshake: a
-// server that cannot produce the right signature is rejected by the client
-// even though it accepted the proof.
+// TestRogueServerIsDetected checks the mutual half of the handshake: a server that cannot produce the right signature
+// is rejected by the client even though it accepted the proof.
 func TestRogueServerIsDetected(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -519,8 +507,7 @@ func TestRogueServerIsDetected(t *testing.T) {
 							Nonce:      base64.StdEncoding.EncodeToString(nonce),
 						}
 					case protocol.TypeAuth:
-						// Pretend the proof was fine, but sign with a key
-						// we do not have.
+						// Pretend the proof was fine, but sign with a key we do not have.
 						resp.Signature = base64.StdEncoding.EncodeToString(make([]byte, 32))
 					}
 					if err := protocol.WriteMessage(conn, &resp); err != nil {
@@ -538,9 +525,8 @@ func TestRogueServerIsDetected(t *testing.T) {
 	}
 }
 
-// startRecordingProxy puts a man in the middle between the client and
-// upstream. It is frame-aware, so the recording is the sequence of JSON
-// message bodies, one per line, in both directions.
+// startRecordingProxy puts a man in the middle between the client and upstream. It is frame-aware, so the recording is
+// the sequence of JSON message bodies, one per line, in both directions.
 func startRecordingProxy(t *testing.T, upstream string) (addr string, recorded func() string) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -597,8 +583,7 @@ func startRecordingProxy(t *testing.T, upstream string) (addr string, recorded f
 	}
 }
 
-// pipeFrames forwards length-prefixed frames from src to dst, handing every
-// body to record on the way through.
+// pipeFrames forwards length-prefixed frames from src to dst, handing every body to record on the way through.
 func pipeFrames(dst io.Writer, src io.Reader, record func([]byte)) {
 	for {
 		var header [4]byte

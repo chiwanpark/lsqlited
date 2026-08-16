@@ -8,9 +8,8 @@ import (
 	"time"
 )
 
-// Value type tags. All values are transported as strings to preserve
-// full precision (e.g. int64 values beyond 2^53 would lose precision as
-// JSON numbers).
+// Value type tags. All values are transported as strings to preserve full precision (e.g. int64 values beyond 2^53
+// would lose precision as JSON numbers).
 const (
 	TypeTagNull  = "null"
 	TypeTagInt   = "int"
@@ -27,8 +26,7 @@ type Value struct {
 	V string `json:"v,omitempty"`
 }
 
-// EncodeValue converts a Go value produced by database/sql or
-// database/sql/driver into a wire Value.
+// EncodeValue converts a Go value produced by database/sql or database/sql/driver into a wire Value.
 func EncodeValue(v any) (Value, error) {
 	switch v := v.(type) {
 	case nil:
@@ -108,8 +106,7 @@ func EncodeValues(vals []any) ([]Value, error) {
 	return out, nil
 }
 
-// DecodeValues decodes a slice of wire Values into []any suitable for
-// passing to database/sql query methods.
+// DecodeValues decodes a slice of wire Values into []any suitable for passing to database/sql query methods.
 func DecodeValues(vals []Value) ([]any, error) {
 	if len(vals) == 0 {
 		return nil, nil

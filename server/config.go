@@ -9,35 +9,29 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config is the top-level server configuration, usually loaded from a YAML
-// file. See config.example.yaml for the full set of keys.
+// Config is the top-level server configuration, usually loaded from a YAML file. See config.example.yaml for the full
+// set of keys.
 type Config struct {
 	Listen ListenConfig `yaml:"listen"`
 	// Limits bound the work a single statement may do.
 	Limits `yaml:",inline"`
-	// MaxConnections bounds the SQLite connections one database may have open
-	// at a time, which is how many statements it can run in parallel. Zero
-	// leaves it unbounded.
+	// MaxConnections bounds the SQLite connections one database may have open at a time, which is how many statements it
+	// can run in parallel. Zero leaves it unbounded.
 	MaxConnections int `yaml:"max_connections"`
-	// Params are SQLite DSN query parameters appended to the "file:" URI of
-	// every database, e.g. mode=ro. See the go-sqlite3 documentation for the
-	// supported set.
+	// Params are SQLite DSN query parameters appended to the "file:" URI of every database, e.g. mode=ro. See the
+	// go-sqlite3 documentation for the supported set.
 	Params Params `yaml:"params"`
-	// Extensions are loadable SQLite extensions registered on every
-	// connection to every database.
+	// Extensions are loadable SQLite extensions registered on every connection to every database.
 	Extensions Extensions `yaml:"extensions"`
-	// TLS configures transport security. Omitted, the protocol travels in
-	// cleartext.
+	// TLS configures transport security. Omitted, the protocol travels in cleartext.
 	TLS  TLSConfig  `yaml:"tls"`
 	Auth AuthConfig `yaml:"auth"`
-	// Databases maps the logical name a client connects to onto the path of
-	// the SQLite file serving it. Every database is opened the same way, from
-	// the settings above.
+	// Databases maps the logical name a client connects to onto the path of the SQLite file serving it. Every database is
+	// opened the same way, from the settings above.
 	Databases map[string]string `yaml:"databases"`
 }
 
-// ListenConfig configures the TCP listener. An empty host binds to all
-// interfaces.
+// ListenConfig configures the TCP listener. An empty host binds to all interfaces.
 type ListenConfig struct {
 	Host string `yaml:"host"`
 	Port int    `yaml:"port"`

@@ -14,22 +14,18 @@ type AuthConfig struct {
 	Users map[string]UserConfig `yaml:"users"`
 }
 
-// UserConfig holds the credential of a single account and the databases it
-// may access.
+// UserConfig holds the credential of a single account and the databases it may access.
 type UserConfig struct {
-	// Verifier is the credential produced by "lsqlited -hash-password", which
-	// also decides the PBKDF2 cost.
+	// Verifier is the credential produced by "lsqlited -hash-password", which also decides the PBKDF2 cost.
 	Verifier string `yaml:"verifier"`
-	// Databases lists the database names the account may use; every name must
-	// match an entry under Config.Databases.
+	// Databases lists the database names the account may use; every name must match an entry under Config.Databases.
 	Databases []string `yaml:"databases"`
 }
 
 // Account is the runtime form of a UserConfig.
 type Account struct {
 	Verifier *auth.Verifier
-	// databases is the set of names the account may access, or nil when it
-	// may access all of them.
+	// databases is the set of names the account may access, or nil when it may access all of them.
 	databases map[string]struct{}
 }
 
@@ -42,8 +38,7 @@ func (a *Account) CanAccess(database string) bool {
 	return ok
 }
 
-// Accounts derives the runtime account of every configured user, returning nil
-// when authentication is disabled.
+// Accounts derives the runtime account of every configured user, returning nil when authentication is disabled.
 func (a AuthConfig) Accounts() (map[string]*Account, error) {
 	if len(a.Users) == 0 {
 		return nil, nil
@@ -59,10 +54,9 @@ func (a AuthConfig) Accounts() (map[string]*Account, error) {
 	return accounts, nil
 }
 
-// decoyIterations is the PBKDF2 count advertised to unknown users. Taking the
-// one most accounts use keeps a fabricated challenge indistinguishable from a
-// real one, without a configuration key that could be set to something no
-// account actually uses. Ties go to the smaller count.
+// decoyIterations is the PBKDF2 count advertised to unknown users. Taking the one most accounts use keeps a fabricated
+// challenge indistinguishable from a real one, without a configuration key that could be set to something no account
+// actually uses. Ties go to the smaller count.
 func decoyIterations(accounts map[string]*Account) int {
 	counts := make(map[int]int, len(accounts))
 	for _, account := range accounts {
@@ -77,9 +71,8 @@ func decoyIterations(accounts map[string]*Account) int {
 	return best
 }
 
-// validate checks the authentication section. Grants are cross-checked against
-// databases so that a typo in a database name is caught at load time rather
-// than surfacing as a denied query later.
+// validate checks the authentication section. Grants are cross-checked against databases so that a typo in a database
+// name is caught at load time rather than surfacing as a denied query later.
 func (a AuthConfig) validate(databases map[string]string) error {
 	for _, name := range sortedKeys(a.Users) {
 		if strings.TrimSpace(name) == "" {
@@ -112,9 +105,8 @@ func (u UserConfig) account() (*Account, error) {
 	return &Account{Verifier: verifier, databases: u.databaseSet()}, nil
 }
 
-// databaseSet returns the granted names, or nil for unrestricted access. An
-// omitted list decodes to a nil slice while an explicit empty list does not,
-// which is what distinguishes "all" from "none".
+// databaseSet returns the granted names, or nil for unrestricted access. An omitted list decodes to a nil slice while
+// an explicit empty list does not, which is what distinguishes "all" from "none".
 func (u UserConfig) databaseSet() map[string]struct{} {
 	if u.Databases == nil {
 		return nil

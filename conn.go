@@ -14,9 +14,8 @@ import (
 	"github.com/chiwanpark/lsqlited/internal/protocol"
 )
 
-// conn is a single client connection. database/sql guarantees that a conn is
-// used by at most one goroutine at a time, but the mutex additionally guards
-// against interleaved frames.
+// conn is a single client connection. database/sql guarantees that a conn is used by at most one goroutine at a time,
+// but the mutex additionally guards against interleaved frames.
 type conn struct {
 	nc           net.Conn
 	database     string
@@ -38,8 +37,8 @@ var (
 	_ driver.SessionResetter = (*conn)(nil)
 )
 
-// roundTrip sends a request and reads the single response. Any I/O failure
-// poisons the connection so the pool discards it.
+// roundTrip sends a request and reads the single response. Any I/O failure poisons the connection so the pool discards
+// it.
 func (c *conn) roundTrip(ctx context.Context, req *protocol.Request) (*protocol.Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -50,10 +49,9 @@ func (c *conn) roundTrip(ctx context.Context, req *protocol.Request) (*protocol.
 		return nil, err
 	}
 
-	// Interrupt blocking I/O when the context is canceled, and lift the
-	// deadline again afterwards. Waiting for the callback is what keeps a
-	// request that completed in the very instant the context expired from
-	// leaving a deadline in the past for the next user of the connection.
+	// Interrupt blocking I/O when the context is canceled, and lift the deadline again afterwards. Waiting for the
+	// callback is what keeps a request that completed in the very instant the context expired from leaving a deadline in
+	// the past for the next user of the connection.
 	interrupted := make(chan struct{})
 	stop := context.AfterFunc(ctx, func() {
 		defer close(interrupted)
@@ -110,9 +108,8 @@ func (c *conn) Begin() (driver.Tx, error) {
 	return c.BeginTx(context.Background(), driver.TxOptions{})
 }
 
-// BeginTx starts a transaction. A read-only one runs alongside other readers;
-// any other takes SQLite's write lock as it begins, so that it cannot fail
-// later for having read before it wrote.
+// BeginTx starts a transaction. A read-only one runs alongside other readers; any other takes SQLite's write lock as it
+// begins, so that it cannot fail later for having read before it wrote.
 func (c *conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
 	if opts.Isolation != driver.IsolationLevel(sql.LevelDefault) {
 		return nil, errors.New("lsqlited: custom isolation levels are not supported")
@@ -168,10 +165,9 @@ func (c *conn) ExecContext(ctx context.Context, query string, args []driver.Name
 	return &result{lastInsertID: resp.LastInsertID, rowsAffected: resp.RowsAffected}, nil
 }
 
-// timeoutMS is the server-side time limit to ask for. A deadline on the
-// context wins, since the caller has already said how long it is willing to
-// wait; the remaining time is rounded up so that a sub-millisecond remainder
-// does not turn into "no limit".
+// timeoutMS is the server-side time limit to ask for. A deadline on the context wins, since the caller has already said
+// how long it is willing to wait; the remaining time is rounded up so that a sub-millisecond remainder does not turn
+// into "no limit".
 func (c *conn) timeoutMS(ctx context.Context) int64 {
 	deadline, ok := ctx.Deadline()
 	if !ok {
@@ -183,8 +179,8 @@ func (c *conn) timeoutMS(ctx context.Context) int64 {
 	}
 	ms := (int64(remaining) + int64(time.Millisecond) - 1) / int64(time.Millisecond)
 	if ms > math.MaxInt64/int64(time.Millisecond) {
-		// A deadline centuries out is the same as none at all, and this keeps
-		// the server from overflowing when it converts the value.
+		// A deadline centuries out is the same as none at all, and this keeps the server from overflowing when it converts
+		// the value.
 		return 0
 	}
 	return ms

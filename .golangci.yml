@@ -1,0 +1,13 @@
+version: "2"
+
+# Line length only. go vet and the test suite cover correctness; this file
+# exists to keep formatting from drifting.
+linters:
+  default: none
+  enable:
+  - lll
+  settings:
+    lll:
+      # Tabs count as one character, matching gofmt's own view of a line.
+      line-length: 120
+      tab-width: 1

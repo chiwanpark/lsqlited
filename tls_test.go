@@ -20,9 +20,8 @@ import (
 	"github.com/chiwanpark/lsqlited/server"
 )
 
-// testCA is a throwaway certificate authority. Generating certificates in
-// the test keeps them short-lived and avoids checking key material into the
-// repository.
+// testCA is a throwaway certificate authority. Generating certificates in the test keeps them short-lived and avoids
+// checking key material into the repository.
 type testCA struct {
 	dir   string
 	cert  *x509.Certificate
@@ -58,9 +57,8 @@ func newTestCA(t *testing.T, name string) *testCA {
 	return ca
 }
 
-// issue signs a leaf certificate valid for the given hosts, which may be IP
-// addresses or DNS names, and returns the paths of its PEM certificate and
-// key.
+// issue signs a leaf certificate valid for the given hosts, which may be IP addresses or DNS names, and returns the
+// paths of its PEM certificate and key.
 func (ca *testCA) issue(t *testing.T, name string, hosts ...string) (certPath, keyPath string) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -124,8 +122,7 @@ func startTLSServer(t *testing.T, tlsCfg server.TLSConfig, auth server.AuthConfi
 	return serve(t, &server.Config{TLS: tlsCfg, Auth: auth})
 }
 
-// sslDSN builds a DSN with the given ssl_* parameters, escaping the file
-// paths for us.
+// sslDSN builds a DSN with the given ssl_* parameters, escaping the file paths for us.
 func sslDSN(addr, database string, params map[string]string) string {
 	q := url.Values{}
 	for key, val := range params {
@@ -134,10 +131,9 @@ func sslDSN(addr, database string, params map[string]string) string {
 	return fmt.Sprintf("lsqlited://%s/%s?%s", addr, database, q.Encode())
 }
 
-// roundTrip exercises the connection with a write and a read, so that a test
-// proves data really flows rather than only that the handshake completed.
-// Every failure is returned, including the ones sql.Open reports for a
-// malformed DSN, so that negative cases can assert on them.
+// roundTrip exercises the connection with a write and a read, so that a test proves data really flows rather than only
+// that the handshake completed. Every failure is returned, including the ones sql.Open reports for a malformed DSN, so
+// that negative cases can assert on them.
 func roundTrip(t *testing.T, dsn string) error {
 	t.Helper()
 	db, err := sql.Open("lsqlited", dsn)
@@ -175,8 +171,8 @@ func TestTLSEndToEnd(t *testing.T) {
 	}
 }
 
-// TestTLSModes walks the ssl_mode matrix against a server whose certificate
-// is valid for "other.example.com" but not for the address dialed.
+// TestTLSModes walks the ssl_mode matrix against a server whose certificate is valid for "other.example.com" but not
+// for the address dialed.
 func TestTLSModes(t *testing.T) {
 	ca := newTestCA(t, "lsqlited test CA")
 	cert, key := ca.issue(t, "server", "other.example.com")
@@ -234,8 +230,7 @@ func TestTLSModes(t *testing.T) {
 	}
 }
 
-// TestTLSRejectsPlaintextClient checks that a server configured for TLS does
-// not fall back to cleartext.
+// TestTLSRejectsPlaintextClient checks that a server configured for TLS does not fall back to cleartext.
 func TestTLSRejectsPlaintextClient(t *testing.T) {
 	ca := newTestCA(t, "lsqlited test CA")
 	cert, key := ca.issue(t, "server", "127.0.0.1")
@@ -246,8 +241,8 @@ func TestTLSRejectsPlaintextClient(t *testing.T) {
 	}
 }
 
-// TestTLSRejectedByPlaintextServer is the mirror image: a client asking for
-// TLS must not silently talk to a server that does not speak it.
+// TestTLSRejectedByPlaintextServer is the mirror image: a client asking for TLS must not silently talk to a server that
+// does not speak it.
 func TestTLSRejectedByPlaintextServer(t *testing.T) {
 	addr := startServer(t)
 	if err := roundTrip(t, sslDSN(addr, "test", map[string]string{"ssl_mode": "require"})); err == nil {
@@ -292,8 +287,8 @@ func TestMutualTLS(t *testing.T) {
 	}
 }
 
-// TestTLSWithPasswordAuth covers the intended production setup: TLS for the
-// transport, the challenge-response handshake for the account.
+// TestTLSWithPasswordAuth covers the intended production setup: TLS for the transport, the challenge-response handshake
+// for the account.
 func TestTLSWithPasswordAuth(t *testing.T) {
 	ca := newTestCA(t, "lsqlited test CA")
 	cert, key := ca.issue(t, "server", "127.0.0.1")
@@ -304,14 +299,12 @@ func TestTLSWithPasswordAuth(t *testing.T) {
 		})
 
 	params := url.Values{"ssl_ca": []string{ca.Chain}}
-	dsn := fmt.Sprintf("lsqlited://%s@%s/test?%s",
-		url.UserPassword("alice", "s3cret").String(), addr, params.Encode())
+	dsn := fmt.Sprintf("lsqlited://%s@%s/test?%s", url.UserPassword("alice", "s3cret").String(), addr, params.Encode())
 	if err := roundTrip(t, dsn); err != nil {
 		t.Fatalf("authenticated round trip over TLS: %v", err)
 	}
 
-	bad := fmt.Sprintf("lsqlited://%s@%s/test?%s",
-		url.UserPassword("alice", "wrong").String(), addr, params.Encode())
+	bad := fmt.Sprintf("lsqlited://%s@%s/test?%s", url.UserPassword("alice", "wrong").String(), addr, params.Encode())
 	if err := roundTrip(t, bad); err == nil {
 		t.Error("expected authentication to fail over TLS too")
 	}
@@ -320,9 +313,7 @@ func TestTLSWithPasswordAuth(t *testing.T) {
 func TestTLSMinVersion(t *testing.T) {
 	ca := newTestCA(t, "lsqlited test CA")
 	cert, key := ca.issue(t, "server", "127.0.0.1")
-	addr := startTLSServer(t,
-		server.TLSConfig{Cert: cert, Key: key, MinVersion: "1.3"},
-		server.AuthConfig{})
+	addr := startTLSServer(t, server.TLSConfig{Cert: cert, Key: key, MinVersion: "1.3"}, server.AuthConfig{})
 
 	if err := roundTrip(t, sslDSN(addr, "test", map[string]string{"ssl_ca": ca.Chain})); err != nil {
 		t.Fatalf("round trip with min_version 1.3: %v", err)

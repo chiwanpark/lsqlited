@@ -1,5 +1,4 @@
-// Command lsqlited is a lightweight daemon that serves SQLite databases
-// over TCP.
+// Command lsqlited is a lightweight daemon that serves SQLite databases over TCP.
 package main
 
 import (
@@ -19,8 +18,7 @@ import (
 	"github.com/chiwanpark/lsqlited/server"
 )
 
-// limitValue renders a configured bound for the startup log, naming the unset
-// case rather than printing a bare zero.
+// limitValue renders a configured bound for the startup log, naming the unset case rather than printing a bare zero.
 func limitValue(value string, unset bool) string {
 	if unset {
 		return "unlimited"
@@ -31,10 +29,8 @@ func limitValue(value string, unset bool) string {
 func main() {
 	configPath := flag.String("config", "lsqlited.yaml", "path to the YAML configuration file")
 	logLevel := flag.String("log-level", "info", "log level (debug, info, warn, error)")
-	hashPassword := flag.Bool("hash-password", false,
-		"read a password from stdin, print an auth.users verifier, and exit")
-	iterations := flag.Int("iterations", auth.DefaultIterations,
-		"PBKDF2 iteration count used by -hash-password")
+	hashPassword := flag.Bool("hash-password", false, "read a password from stdin, print an auth.users verifier, and exit")
+	iterations := flag.Int("iterations", auth.DefaultIterations, "PBKDF2 iteration count used by -hash-password")
 	showVersion := flag.Bool("version", false, "print the server version and exit")
 	flag.Parse()
 
@@ -91,8 +87,8 @@ func main() {
 	}
 }
 
-// printVerifier reads a password from in and writes its verifier to out, so
-// that the configuration file never has to hold the password itself.
+// printVerifier reads a password from in and writes its verifier to out, so that the configuration file never has to
+// hold the password itself.
 func printVerifier(in io.Reader, out io.Writer, iterations int) error {
 	raw, err := io.ReadAll(in)
 	if err != nil {

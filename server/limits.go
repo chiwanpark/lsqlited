@@ -5,23 +5,21 @@ import (
 	"time"
 )
 
-// Limits bound the work a single statement may do. They are the daemon's own
-// safety net: a client may ask for a tighter bound, but never for a looser one.
+// Limits bound the work a single statement may do. They are the daemon's own safety net: a client may ask for a tighter
+// bound, but never for a looser one.
 type Limits struct {
-	// QueryTimeout is the upper bound on how long a single statement may run,
-	// in seconds. Zero leaves statements unbounded.
+	// QueryTimeout is the upper bound on how long a single statement may run, in seconds. Zero leaves statements
+	// unbounded.
 	QueryTimeout int64 `yaml:"query_timeout"`
-	// TransactionTimeout is how long a transaction may sit without a request,
-	// in seconds, before the daemon rolls it back and drops the session. Zero
-	// waits forever.
+	// TransactionTimeout is how long a transaction may sit without a request, in seconds, before the daemon rolls it back
+	// and drops the session. Zero waits forever.
 	TransactionTimeout int64 `yaml:"transaction_timeout"`
-	// MaxRows is the upper bound on the rows one query result may carry. Zero
-	// leaves results unbounded.
+	// MaxRows is the upper bound on the rows one query result may carry. Zero leaves results unbounded.
 	MaxRows int64 `yaml:"max_rows"`
 }
 
-// statementLimits are the bounds that apply to one statement, once the
-// configuration and the client's request have been reconciled.
+// statementLimits are the bounds that apply to one statement, once the configuration and the client's request have been
+// reconciled.
 type statementLimits struct {
 	timeout            time.Duration
 	transactionTimeout time.Duration

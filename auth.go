@@ -12,10 +12,9 @@ import (
 	"github.com/chiwanpark/lsqlited/internal/protocol"
 )
 
-// authenticate runs the challenge-response handshake. The password is used
-// only to derive a proof bound to both peers' nonces, so an observer learns
-// nothing reusable, and the server's reply is checked in turn so that a rogue
-// server cannot impersonate the real one.
+// authenticate runs the challenge-response handshake. The password is used only to derive a proof bound to both peers'
+// nonces, so an observer learns nothing reusable, and the server's reply is checked in turn so that a rogue server
+// cannot impersonate the real one.
 func (c *connector) authenticate(ctx context.Context, cn *conn) error {
 	clientNonce, err := auth.Nonce()
 	if err != nil {

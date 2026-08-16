@@ -11,11 +11,9 @@ import (
 	"github.com/chiwanpark/lsqlited"
 )
 
-// TestConcurrentWriteTransactions checks that transactions which read before
-// they write survive running at the same time. SQLite refuses to give the
-// write lock to a transaction that has already read while another connection
-// wrote, and refuses without waiting, so a transaction that takes the lock
-// only when it writes fails here often.
+// TestConcurrentWriteTransactions checks that transactions which read before they write survive running at the same
+// time. SQLite refuses to give the write lock to a transaction that has already read while another connection wrote,
+// and refuses without waiting, so a transaction that takes the lock only when it writes fails here often.
 func TestConcurrentWriteTransactions(t *testing.T) {
 	addr := startServer(t)
 	db := openDB(t, addr, "test")
@@ -48,8 +46,8 @@ func TestConcurrentWriteTransactions(t *testing.T) {
 		t.Errorf("transaction failed: %v", err)
 	}
 
-	// Every transaction read a value and wrote it back incremented, so the
-	// count is exact only if none of them was lost or applied twice.
+	// Every transaction read a value and wrote it back incremented, so the count is exact only if none of them was lost or
+	// applied twice.
 	var n int
 	if err := db.QueryRow("SELECT n FROM counter WHERE id = 1").Scan(&n); err != nil {
 		t.Fatalf("read counter: %v", err)
@@ -110,8 +108,8 @@ func TestReadOnlyTransaction(t *testing.T) {
 		t.Fatalf("rollback: %v", err)
 	}
 
-	// The connection that served it must come back usable for writing:
-	// read-only was a property of the transaction, not of the database.
+	// The connection that served it must come back usable for writing: read-only was a property of the transaction, not of
+	// the database.
 	for i := 0; i < 10; i++ {
 		if _, err := db.Exec("INSERT INTO t (n) VALUES (3)"); err != nil {
 			t.Fatalf("write after a read-only transaction: %v", err)
@@ -119,11 +117,10 @@ func TestReadOnlyTransaction(t *testing.T) {
 	}
 }
 
-// TestBusyIsClassified checks that a lock the daemon could not get in time is
-// reported as such, so a client can tell "try again" from "fix your SQL".
+// TestBusyIsClassified checks that a lock the daemon could not get in time is reported as such, so a client can tell
+// "try again" from "fix your SQL".
 func TestBusyIsClassified(t *testing.T) {
-	// A busy timeout of a millisecond leaves no room to wait, so the second
-	// writer is refused rather than queued.
+	// A busy timeout of a millisecond leaves no room to wait, so the second writer is refused rather than queued.
 	addr := startLimitedServerWithParams(t, map[string]string{"_busy_timeout": "1"})
 	holder := openDB(t, addr, "test")
 	if _, err := holder.Exec("CREATE TABLE t (n INTEGER)"); err != nil {

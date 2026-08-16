@@ -21,8 +21,7 @@ const (
 	idleConnTimeout      = 5 * time.Minute
 )
 
-// baseDriverName is stock SQLite plus lsqlited_version(), which every
-// database gets.
+// baseDriverName is stock SQLite plus lsqlited_version(), which every database gets.
 const baseDriverName = version.DriverName
 
 // queryer abstracts *sql.DB and *sql.Conn.
@@ -38,9 +37,8 @@ func openSQLite(path string, cfg *Config) (*sql.DB, error) {
 		return nil, err
 	}
 	configurePool(db, cfg.MaxConnections)
-	// Extensions load when a connection is made, not by sql.Open, so pinging
-	// here attaches a missing library to opening the database rather than to
-	// whatever query happens to run first.
+	// Extensions load when a connection is made, not by sql.Open, so pinging here attaches a missing library to opening
+	// the database rather than to whatever query happens to run first.
 	if err := db.Ping(); err != nil {
 		db.Close()
 		if len(exts) > 0 {
@@ -51,8 +49,7 @@ func openSQLite(path string, cfg *Config) (*sql.DB, error) {
 	return db, nil
 }
 
-// sqliteDSN builds the "file:" URI used to open a database. Configured params
-// override the built-in defaults.
+// sqliteDSN builds the "file:" URI used to open a database. Configured params override the built-in defaults.
 func sqliteDSN(path string, params Params) string {
 	q := url.Values{"_busy_timeout": {strconv.Itoa(defaultBusyTimeoutMS)}}
 	for key, val := range params {
@@ -61,8 +58,7 @@ func sqliteDSN(path string, params Params) string {
 	return "file:" + path + "?" + q.Encode()
 }
 
-// configurePool sizes the connection pool, which is what decides how many
-// statements a database runs in parallel.
+// configurePool sizes the connection pool, which is what decides how many statements a database runs in parallel.
 func configurePool(db *sql.DB, maxConns int) {
 	idle := defaultIdleConns()
 	if maxConns > 0 {
@@ -73,22 +69,19 @@ func configurePool(db *sql.DB, maxConns int) {
 	db.SetConnMaxIdleTime(idleConnTimeout)
 }
 
-// defaultIdleConns is how many connections stay warm when nothing bounds the
-// pool. Statements are CPU-bound once the pages are cached, so a core's worth
-// keeps the machine busy; a burst may open more, they are simply not kept.
+// defaultIdleConns is how many connections stay warm when nothing bounds the pool. Statements are CPU-bound once the
+// pages are cached, so a core's worth keeps the machine busy; a burst may open more, they are simply not kept.
 func defaultIdleConns() int { return max(4, runtime.NumCPU()) }
 
-// sqliteDrivers memoizes the driver registered for a set of extensions.
-// database/sql panics on a duplicate name, so a restarted server, or two
-// databases sharing a set, must reuse the first registration.
+// sqliteDrivers memoizes the driver registered for a set of extensions. database/sql panics on a duplicate name, so a
+// restarted server, or two databases sharing a set, must reuse the first registration.
 var sqliteDrivers = struct {
 	sync.Mutex
 	names map[string]string
 }{names: make(map[string]string)}
 
-// sqliteDriver returns a driver that loads exts into every connection it
-// opens. Extensions cannot be attached to an existing pool, so each distinct
-// set needs a driver of its own.
+// sqliteDriver returns a driver that loads exts into every connection it opens. Extensions cannot be attached to an
+// existing pool, so each distinct set needs a driver of its own.
 func sqliteDriver(exts Extensions) string {
 	if len(exts) == 0 {
 		return baseDriverName
@@ -108,9 +101,8 @@ func sqliteDriver(exts Extensions) string {
 	return name
 }
 
-// extensionHook registers lsqlited_version() and loads every extension that
-// names an entry point. Those without one are handed to the driver instead,
-// which lets SQLite derive the symbol.
+// extensionHook registers lsqlited_version() and loads every extension that names an entry point. Those without one are
+// handed to the driver instead, which lets SQLite derive the symbol.
 func extensionHook(exts Extensions) func(*sqlite3.SQLiteConn) error {
 	var named Extensions
 	for _, ext := range exts {
@@ -131,9 +123,8 @@ func extensionHook(exts Extensions) func(*sqlite3.SQLiteConn) error {
 	}
 }
 
-// isBusy reports whether err is SQLite refusing to wait any longer for a lock
-// another connection holds. Nothing is wrong with the statement, so the
-// client is told to retry rather than to fix it.
+// isBusy reports whether err is SQLite refusing to wait any longer for a lock another connection holds. Nothing is
+// wrong with the statement, so the client is told to retry rather than to fix it.
 func isBusy(err error) bool {
 	var sqliteErr sqlite3.Error
 	if !errors.As(err, &sqliteErr) {

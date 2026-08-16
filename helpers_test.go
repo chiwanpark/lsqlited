@@ -9,9 +9,8 @@ import (
 	"github.com/chiwanpark/lsqlited/server"
 )
 
-// serve starts a server on an ephemeral port and returns its address. Callers
-// state only what the test is about: the listener, and the databases when the
-// test does not name its own, are filled in here.
+// serve starts a server on an ephemeral port and returns its address. Callers state only what the test is about: the
+// listener, and the databases when the test does not name its own, are filled in here.
 func serve(t *testing.T, cfg *server.Config) string {
 	t.Helper()
 	cfg.Listen = server.ListenConfig{Host: "127.0.0.1", Port: 0}

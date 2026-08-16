@@ -5,8 +5,7 @@ import (
 	"testing"
 )
 
-// startTestServer starts a server on an ephemeral port and returns it with its
-// address.
+// startTestServer starts a server on an ephemeral port and returns it with its address.
 func startTestServer(t *testing.T, cfg *Config) (*Server, string) {
 	t.Helper()
 	cfg.Listen = ListenConfig{Host: "127.0.0.1", Port: 0}

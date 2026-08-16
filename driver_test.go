@@ -65,8 +65,7 @@ func TestEndToEnd(t *testing.T) {
 	}
 	if id != 1 || name != "widget" || !weight.Valid || weight.Float64 != 1.5 ||
 		string(data) != "\xde\xad" || !ts.Equal(createdAt) || !active {
-		t.Errorf("unexpected row: id=%d name=%q weight=%+v data=%x ts=%v active=%v",
-			id, name, weight, data, ts, active)
+		t.Errorf("unexpected row: id=%d name=%q weight=%+v data=%x ts=%v active=%v", id, name, weight, data, ts, active)
 	}
 
 	rows, err := db.Query("SELECT name, weight FROM items ORDER BY id")
@@ -165,9 +164,8 @@ func TestPreparedStatement(t *testing.T) {
 	}
 }
 
-// TestReadOnlyServer checks that the configured SQLite parameters reach the
-// file: a daemon that opens its databases with mode=ro serves reads and
-// refuses writes.
+// TestReadOnlyServer checks that the configured SQLite parameters reach the file: a daemon that opens its databases
+// with mode=ro serves reads and refuses writes.
 func TestReadOnlyServer(t *testing.T) {
 	path := testPath(t)
 	rw := openDB(t, serve(t, &server.Config{
@@ -279,8 +277,8 @@ func TestInvalidDSN(t *testing.T) {
 	for _, dsn := range cases {
 		db, err := sql.Open("lsqlited", dsn)
 		if err == nil {
-			// sql.Open defers validation for drivers without DriverContext,
-			// but ours implements it, so errors surface on Ping at latest.
+			// sql.Open defers validation for drivers without DriverContext, but ours implements it, so errors surface on Ping at
+			// latest.
 			err = db.Ping()
 			db.Close()
 		}

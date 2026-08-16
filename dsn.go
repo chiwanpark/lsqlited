@@ -19,8 +19,8 @@ type dsnConfig struct {
 	dialTimeout time.Duration
 	username    string
 	password    string
-	// queryTimeout bounds a statement on the server when the caller's context
-	// carries no deadline of its own. Zero asks for no limit.
+	// queryTimeout bounds a statement on the server when the caller's context carries no deadline of its own. Zero asks
+	// for no limit.
 	queryTimeout time.Duration
 	// maxRows caps the rows a query may return. Zero asks for no limit.
 	maxRows int64
@@ -89,17 +89,16 @@ func parseDSNParts(dsn string) (*dsnConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Certificates are read now rather than per connection, so a typo in a
-	// path is reported by sql.Open instead of by the first query.
+	// Certificates are read now rather than per connection, so a typo in a path is reported by sql.Open instead of by the
+	// first query.
 	if cfg.tls, err = ssl.tlsConfig(host); err != nil {
 		return nil, err
 	}
 	return cfg, nil
 }
 
-// knownDSNParams is the set of recognized query parameters. Unknown ones are
-// rejected rather than ignored: silently dropping a misspelled ssl_mode would
-// hand the caller a cleartext connection it believed was encrypted.
+// knownDSNParams is the set of recognized query parameters. Unknown ones are rejected rather than ignored: silently
+// dropping a misspelled ssl_mode would hand the caller a cleartext connection it believed was encrypted.
 var knownDSNParams = map[string]bool{
 	"dial_timeout":    true,
 	"query_timeout":   true,
@@ -125,8 +124,7 @@ func checkDSNParams(q url.Values) error {
 	return fmt.Errorf("unknown parameter(s) %s", strings.Join(unknown, ", "))
 }
 
-// durationParam reads a non-negative duration, falling back to def when the
-// parameter is absent.
+// durationParam reads a non-negative duration, falling back to def when the parameter is absent.
 func durationParam(q url.Values, key string, def time.Duration) (time.Duration, error) {
 	v := q.Get(key)
 	if v == "" {

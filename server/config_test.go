@@ -8,9 +8,10 @@ import (
 	"github.com/chiwanpark/lsqlited/internal/auth"
 )
 
-// testVerifier is a syntactically valid credential, for the cases whose
-// subject is something other than the credential itself.
-const testVerifier = "SCRAM-SHA-256$4096:4X/1OevPJo0nxVmGMhochg==$hUeU8yswZ8nWH3GIkn1BAc5zwfLC7yDoOiDYnYSunAE=:aX9c/LVO0TcYRedgwLyvphjukETWWUwHn0uFJgprzew="
+// testVerifier is a syntactically valid credential, for the cases whose subject is something other than the credential
+// itself.
+const testVerifier = "SCRAM-SHA-256$4096:4X/1OevPJo0nxVmGMhochg==$" +
+	"hUeU8yswZ8nWH3GIkn1BAc5zwfLC7yDoOiDYnYSunAE=:aX9c/LVO0TcYRedgwLyvphjukETWWUwHn0uFJgprzew="
 
 func writeConfig(t *testing.T, content string) string {
 	t.Helper()
@@ -75,8 +76,8 @@ databases:
 		t.Errorf("limits = %+v, want %+v", cfg.Limits, want)
 	}
 
-	// A configuration that says nothing about limits leaves statements
-	// unbounded, apart from the frame size the protocol imposes anyway.
+	// A configuration that says nothing about limits leaves statements unbounded, apart from the frame size the protocol
+	// imposes anyway.
 	silent := writeConfig(t, `
 listen: {port: 7890}
 databases:
@@ -449,8 +450,7 @@ databases:
 	if len(accounts) != 2 {
 		t.Fatalf("expected 2 accounts, got %d", len(accounts))
 	}
-	// A verifier is used verbatim, and still accepts the password it was
-	// derived from.
+	// A verifier is used verbatim, and still accepts the password it was derived from.
 	if got := accounts["alice"].Verifier.String(); got != alice.String() {
 		t.Errorf("alice credential = %s, want %s", got, alice)
 	}
@@ -466,8 +466,8 @@ databases:
 	}
 }
 
-// TestDecoyIterations checks that the count advertised to an unknown user is
-// the one real accounts use, so a fabricated challenge does not stand out.
+// TestDecoyIterations checks that the count advertised to an unknown user is the one real accounts use, so a fabricated
+// challenge does not stand out.
 func TestDecoyIterations(t *testing.T) {
 	verifier := func(iterations int) *Account {
 		t.Helper()
@@ -515,8 +515,7 @@ func TestDecoyIterations(t *testing.T) {
 	}
 }
 
-// TestLoadConfigGrants covers the three shapes of the per-user database
-// list: omitted, explicit, and explicitly empty.
+// TestLoadConfigGrants covers the three shapes of the per-user database list: omitted, explicit, and explicitly empty.
 func TestLoadConfigGrants(t *testing.T) {
 	v, err := auth.NewVerifier("s3cret", auth.MinIterations)
 	if err != nil {
@@ -583,8 +582,8 @@ databases:
 		}
 	}
 
-	// A name that is not a configured database is never accessible, even to
-	// an unrestricted account it would be resolved (and rejected) later.
+	// A name that is not a configured database is never accessible, even to an unrestricted account it would be resolved
+	// (and rejected) later.
 	if accounts["alice"].CanAccess("nonexistent") {
 		t.Error("a restricted account may access a database outside its grant list")
 	}
@@ -609,8 +608,8 @@ databases:
 	}
 }
 
-// TestExampleConfig keeps the shipped example in step with the schema:
-// KnownFields is on, so a stale key or a renamed section fails here.
+// TestExampleConfig keeps the shipped example in step with the schema: KnownFields is on, so a stale key or a renamed
+// section fails here.
 func TestExampleConfig(t *testing.T) {
 	cfg, err := LoadConfig(filepath.Join("..", "config.example.yaml"))
 	if err != nil {

@@ -62,9 +62,8 @@ func answerOf(t *testing.T, db *sql.DB, function string) int {
 	return got
 }
 
-// TestOpenSQLiteLoadsExtension covers both spellings of an extension entry:
-// a bare path, which leaves the entry point to SQLite, and a mapping naming
-// it explicitly.
+// TestOpenSQLiteLoadsExtension covers both spellings of an extension entry: a bare path, which leaves the entry point
+// to SQLite, and a mapping naming it explicitly.
 func TestOpenSQLiteLoadsExtension(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -92,8 +91,8 @@ func TestOpenSQLiteLoadsExtension(t *testing.T) {
 	}
 }
 
-// TestOpenSQLiteLoadsEveryExtension checks that all the configured extensions
-// reach a database, whether or not they name an entry point.
+// TestOpenSQLiteLoadsEveryExtension checks that all the configured extensions reach a database, whether or not they
+// name an entry point.
 func TestOpenSQLiteLoadsEveryExtension(t *testing.T) {
 	first := buildExtension(t, "sqlite3_extension_init", "lsqlited_first", 1)
 	second := buildExtension(t, "lsqlited_second_init", "lsqlited_second", 2)
@@ -124,9 +123,8 @@ func TestOpenSQLiteLoadsEveryExtension(t *testing.T) {
 	}
 }
 
-// TestServerRegistersExtensions exercises the path a client takes: the
-// server opens the database on first use and the extensions configured for
-// it are already in place.
+// TestServerRegistersExtensions exercises the path a client takes: the server opens the database on first use and the
+// extensions configured for it are already in place.
 func TestServerRegistersExtensions(t *testing.T) {
 	global := buildExtension(t, "sqlite3_extension_init", "lsqlited_srv_global", 7)
 	local := buildExtension(t, "lsqlited_srv_init", "lsqlited_srv_local", 8)
@@ -153,8 +151,8 @@ func TestServerRegistersExtensions(t *testing.T) {
 	}
 }
 
-// TestOpenSQLiteExtensionError checks that a database whose extension cannot
-// be loaded fails to open, with an error naming the offending library.
+// TestOpenSQLiteExtensionError checks that a database whose extension cannot be loaded fails to open, with an error
+// naming the offending library.
 func TestOpenSQLiteExtensionError(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing.so")
 	cases := map[string]Extensions{
@@ -175,9 +173,8 @@ func TestOpenSQLiteExtensionError(t *testing.T) {
 	}
 }
 
-// TestSQLiteDriver checks the memoization of registered drivers: a name is
-// registered once per distinct extension set, and databases without
-// extensions keep using the base driver.
+// TestSQLiteDriver checks the memoization of registered drivers: a name is registered once per distinct extension set,
+// and databases without extensions keep using the base driver.
 func TestSQLiteDriver(t *testing.T) {
 	if got := sqliteDriver(nil); got != baseDriverName {
 		t.Errorf("sqliteDriver(nil) = %q, want %q", got, baseDriverName)
@@ -189,8 +186,7 @@ func TestSQLiteDriver(t *testing.T) {
 	if first == baseDriverName {
 		t.Fatal("extensions must not be registered on the base driver")
 	}
-	// Registering the same name twice panics, so an identical set has to
-	// resolve to the driver registered the first time.
+	// Registering the same name twice panics, so an identical set has to resolve to the driver registered the first time.
 	if again := sqliteDriver(Extensions{{Path: "/tmp/a.so"}}); again != first {
 		t.Errorf("sqliteDriver() = %q, want the memoized %q", again, first)
 	}
@@ -216,8 +212,8 @@ func TestExtensionsDefaultEntrypoints(t *testing.T) {
 	if len(paths) != 2 || paths[0] != "/tmp/a.so" || paths[1] != "/tmp/c.so" {
 		t.Errorf("defaultEntrypoints() = %v, want the entries without an entry point", paths)
 	}
-	// Every connection needs a hook, even one with no entry point to call,
-	// because lsqlited_version() is registered there too.
+	// Every connection needs a hook, even one with no entry point to call, because lsqlited_version() is registered there
+	// too.
 	if hook := extensionHook(exts); hook == nil {
 		t.Error("extensionHook() = nil, want a hook for the named entry point")
 	}

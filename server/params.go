@@ -9,8 +9,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Params holds extra SQLite DSN query parameters. In YAML it is written either
-// as a mapping or as a URL-style query string:
+// Params holds extra SQLite DSN query parameters. In YAML it is written either as a mapping or as a URL-style query
+// string:
 //
 //	params:
 //	  mode: ro
@@ -75,21 +75,19 @@ func (p Params) validate() error {
 	return nil
 }
 
-// Extension identifies an external SQLite extension to load into every
-// connection of a database. In YAML it is written either as a plain path or as
-// a mapping naming the entry point:
+// Extension identifies an external SQLite extension to load into every connection of a database. In YAML it is written
+// either as a plain path or as a mapping naming the entry point:
 //
 //	extensions:
 //	- /usr/lib/sqlite3/vector0.so
 //	- path: /usr/lib/sqlite3/misc.so
 //	  entrypoint: sqlite3_misc_init
 type Extension struct {
-	// Path is the shared library to load, resolved by the platform's dynamic
-	// loader, so a bare file name is looked up along the usual search path.
+	// Path is the shared library to load, resolved by the platform's dynamic loader, so a bare file name is looked up
+	// along the usual search path.
 	Path string `yaml:"path"`
-	// Entrypoint is the initialization symbol to call. When empty, SQLite
-	// picks sqlite3_extension_init, falling back to a name derived from the
-	// file name.
+	// Entrypoint is the initialization symbol to call. When empty, SQLite picks sqlite3_extension_init, falling back to a
+	// name derived from the file name.
 	Entrypoint string `yaml:"entrypoint"`
 }
 
@@ -112,8 +110,8 @@ func (e *Extension) UnmarshalYAML(node *yaml.Node) error {
 		*e = Extension{Path: path}
 		return nil
 	case yaml.MappingNode:
-		// Node.Decode does not inherit the decoder's KnownFields setting, so
-		// unknown keys are rejected by hand to keep typos loud.
+		// Node.Decode does not inherit the decoder's KnownFields setting, so unknown keys are rejected by hand to keep typos
+		// loud.
 		if err := knownFields(node, "path", "entrypoint"); err != nil {
 			return err
 		}
@@ -144,8 +142,8 @@ func knownFields(node *yaml.Node, allowed ...string) error {
 // Extensions is an ordered list of SQLite extensions.
 type Extensions []Extension
 
-// defaultEntrypoints returns the paths of the extensions that name no entry
-// point, letting SQLite work it out on its own.
+// defaultEntrypoints returns the paths of the extensions that name no entry point, letting SQLite work it out on its
+// own.
 func (e Extensions) defaultEntrypoints() []string {
 	var paths []string
 	for _, ext := range e {

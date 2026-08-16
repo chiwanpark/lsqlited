@@ -17,20 +17,18 @@ import (
 	"github.com/chiwanpark/lsqlited/internal/protocol"
 )
 
-// errAuthFailed is deliberately vague: saying whether the user name or the
-// password was wrong would let a client enumerate accounts.
+// errAuthFailed is deliberately vague: saying whether the user name or the password was wrong would let a client
+// enumerate accounts.
 var errAuthFailed = errors.New("authentication failed")
 
-// peer is the client end of a connection: the socket and the buffered reader
-// the request loop reads from.
+// peer is the client end of a connection: the socket and the buffered reader the request loop reads from.
 type peer struct {
 	conn net.Conn
 	br   *bufio.Reader
 }
 
-// watch cancels a running statement when the client goes away, so that work
-// nobody will collect does not keep a core busy. The returned stop function
-// must be called before the request loop reads again, and reports whether the
+// watch cancels a running statement when the client goes away, so that work nobody will collect does not keep a core
+// busy. The returned stop function must be called before the request loop reads again, and reports whether the
 // connection is gone. Peek does not consume, so a pipelined request survives.
 func (p *peer) watch(cancel context.CancelFunc) (stop func() (gone bool)) {
 	if p == nil {
@@ -40,15 +38,14 @@ func (p *peer) watch(cancel context.CancelFunc) (stop func() (gone bool)) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		// A read error means the peer hung up, unless it is the deadline this
-		// watcher was asked to stop with.
+		// A read error means the peer hung up, unless it is the deadline this watcher was asked to stop with.
 		if _, err := p.br.Peek(1); err != nil && !stopping.Load() {
 			gone.Store(true)
 			cancel()
 		}
 	}()
-	// The deadline releases the blocked Peek without closing the connection,
-	// which is still wanted when the statement finishes first.
+	// The deadline releases the blocked Peek without closing the connection, which is still wanted when the statement
+	// finishes first.
 	return func() bool {
 		stopping.Store(true)
 		p.conn.SetReadDeadline(time.Now())
@@ -58,21 +55,20 @@ func (p *peer) watch(cancel context.CancelFunc) (stop func() (gone bool)) {
 	}
 }
 
-// transaction is pinned to one SQLite connection for its whole life, because
-// that is where SQLite keeps the locks and the uncommitted pages.
+// transaction is pinned to one SQLite connection for its whole life, because that is where SQLite keeps the locks and
+// the uncommitted pages.
 type transaction struct {
 	conn     *sql.Conn
 	readOnly bool
-	// idleTimeout bounds how long the session may leave the transaction
-	// alone before the daemon rolls it back. Zero waits forever.
+	// idleTimeout bounds how long the session may leave the transaction alone before the daemon rolls it back. Zero waits
+	// forever.
 	idleTimeout time.Duration
 }
 
-// begin takes the write lock up front, because SQLite refuses to promote a
-// transaction that has already read when another connection wrote in the
-// meantime, returning SQLITE_BUSY instead of waiting. A read-only transaction
-// has nothing to promote, so it starts deferred and runs alongside every other
-// reader, with query_only keeping that true if the client writes after all.
+// begin takes the write lock up front, because SQLite refuses to promote a transaction that has already read when
+// another connection wrote in the meantime, returning SQLITE_BUSY instead of waiting. A read-only transaction has
+// nothing to promote, so it starts deferred and runs alongside every other reader, with query_only keeping that true if
+// the client writes after all.
 func (t *transaction) begin(ctx context.Context) error {
 	if !t.readOnly {
 		_, err := t.conn.ExecContext(ctx, "BEGIN IMMEDIATE")
@@ -85,10 +81,8 @@ func (t *transaction) begin(ctx context.Context) error {
 	return err
 }
 
-// end finishes the transaction and returns the connection to the pool. A
-// connection whose state is no longer certain is discarded instead: reusing
-// it would hand someone else a connection still inside a transaction, or
-// still read-only.
+// end finishes the transaction and returns the connection to the pool. A connection whose state is no longer certain is
+// discarded instead: reusing it would hand someone else a connection still inside a transaction, or still read-only.
 func (t *transaction) end(ctx context.Context, statement string) error {
 	if _, err := t.conn.ExecContext(ctx, statement); err != nil {
 		t.discard()
@@ -96,8 +90,7 @@ func (t *transaction) end(ctx context.Context, statement string) error {
 	}
 	if t.readOnly {
 		if _, err := t.conn.ExecContext(ctx, "PRAGMA query_only = OFF"); err != nil {
-			// The transaction ended cleanly, so this is not the client's
-			// problem; only the connection is unusable.
+			// The transaction ended cleanly, so this is not the client's problem; only the connection is unusable.
 			t.discard()
 			return nil
 		}
@@ -111,14 +104,12 @@ func (t *transaction) discard() {
 	t.conn.Close()
 }
 
-// session is the per-connection state: the authenticated user and an
-// in-progress transaction, if any.
+// session is the per-connection state: the authenticated user and an in-progress transaction, if any.
 type session struct {
 	srv    *Server
 	logger *slog.Logger
 	tx     *transaction
-	// peer is nil when there is no connection to watch, which leaves
-	// statements running until they finish or time out.
+	// peer is nil when there is no connection to watch, which leaves statements running until they finish or time out.
 	peer *peer
 
 	// user is empty until the handshake completes.
@@ -137,8 +128,8 @@ type pendingAuth struct {
 	known bool
 }
 
-// idleDeadline is how long the session may stay quiet. Only a session holding
-// a transaction has one, since only that one is holding something back.
+// idleDeadline is how long the session may stay quiet. Only a session holding a transaction has one, since only that
+// one is holding something back.
 func (sess *session) idleDeadline() time.Time {
 	if sess.tx == nil || sess.tx.idleTimeout <= 0 {
 		return time.Time{}
@@ -154,8 +145,8 @@ func (sess *session) cleanup() {
 	}
 }
 
-// handle answers a single request. It returns nil when the client
-// disconnected while its statement ran and no response is owed.
+// handle answers a single request. It returns nil when the client disconnected while its statement ran and no response
+// is owed.
 func (sess *session) handle(ctx context.Context, req *protocol.Request) *protocol.Response {
 	switch req.Type {
 	case protocol.TypeAuthInit:
@@ -167,8 +158,7 @@ func (sess *session) handle(ctx context.Context, req *protocol.Request) *protoco
 		if sess.user == "" {
 			return errResponse(errors.New("authentication required"))
 		}
-		// Checked per request rather than once at login: a client may name a
-		// different database each time.
+		// Checked per request rather than once at login: a client may name a different database each time.
 		if req.Database != "" && !sess.account.CanAccess(req.Database) {
 			sess.logger.Warn("access denied", "user", sess.user, "database", req.Database)
 			return errResponse(fmt.Errorf("access to database %q is not permitted", req.Database))
@@ -190,8 +180,7 @@ func (sess *session) handle(ctx context.Context, req *protocol.Request) *protoco
 	}
 }
 
-// handleAuthInit answers with a challenge shaped identically for known and
-// unknown accounts.
+// handleAuthInit answers with a challenge shaped identically for known and unknown accounts.
 func (sess *session) handleAuthInit(req *protocol.Request) *protocol.Response {
 	if !sess.srv.authEnabled() {
 		return errResponse(errors.New("authentication is not enabled on this server"))
@@ -213,11 +202,10 @@ func (sess *session) handleAuthInit(req *protocol.Request) *protocol.Response {
 	account, known := sess.srv.account(req.User)
 	verifier := account.Verifier
 	sess.pending = &pendingAuth{
-		user:    req.User,
-		account: account,
-		known:   known,
-		authMessage: auth.AuthMessage(req.User, clientNonce, serverNonce,
-			verifier.Salt, verifier.Iterations),
+		user:        req.User,
+		account:     account,
+		known:       known,
+		authMessage: auth.AuthMessage(req.User, clientNonce, serverNonce, verifier.Salt, verifier.Iterations),
 	}
 	return &protocol.Response{Auth: &protocol.AuthChallenge{
 		Salt:       base64.StdEncoding.EncodeToString(verifier.Salt),
@@ -226,15 +214,15 @@ func (sess *session) handleAuthInit(req *protocol.Request) *protocol.Response {
 	}}
 }
 
-// handleAuth checks the client proof and returns the server signature, which
-// lets the client authenticate the server in turn.
+// handleAuth checks the client proof and returns the server signature, which lets the client authenticate the server in
+// turn.
 func (sess *session) handleAuth(req *protocol.Request) *protocol.Response {
 	if sess.user != "" {
 		return errResponse(errors.New("already authenticated"))
 	}
 	pending := sess.pending
-	// A challenge is single use: a failed attempt must start over, which
-	// forces a fresh nonce and rules out offline proof grinding.
+	// A challenge is single use: a failed attempt must start over, which forces a fresh nonce and rules out offline proof
+	// grinding.
 	sess.pending = nil
 	if pending == nil {
 		return errResponse(errors.New("authentication has not been initiated"))
@@ -250,8 +238,7 @@ func (sess *session) handleAuth(req *protocol.Request) *protocol.Response {
 	sess.account = pending.account
 	sess.logger.Debug("authenticated", "user", sess.user)
 	return &protocol.Response{
-		Signature: base64.StdEncoding.EncodeToString(
-			pending.account.Verifier.ServerSignature(pending.authMessage)),
+		Signature: base64.StdEncoding.EncodeToString(pending.account.Verifier.ServerSignature(pending.authMessage)),
 	}
 }
 
@@ -276,8 +263,7 @@ func (sess *session) handleBegin(ctx context.Context, req *protocol.Request) *pr
 	if err != nil {
 		return errResponse(err)
 	}
-	// Beginning can wait for a free connection and for the write lock, both
-	// bounded by the timeout a statement gets.
+	// Beginning can wait for a free connection and for the write lock, both bounded by the timeout a statement gets.
 	limits := sess.srv.limits(req)
 	ctx, cancel := statementContext(ctx, limits.timeout)
 	defer cancel()
@@ -298,9 +284,8 @@ func (sess *session) handleBegin(ctx context.Context, req *protocol.Request) *pr
 	return &protocol.Response{}
 }
 
-// endTransaction finishes the session's transaction. It is let go whatever
-// happens: a COMMIT that fails has left nothing to commit, and holding on
-// would keep the write lock from everyone else.
+// endTransaction finishes the session's transaction. It is let go whatever happens: a COMMIT that fails has left
+// nothing to commit, and holding on would keep the write lock from everyone else.
 func (sess *session) endTransaction(ctx context.Context, req *protocol.Request, statement string) *protocol.Response {
 	if sess.tx == nil {
 		return errResponse(errors.New("no transaction in progress"))

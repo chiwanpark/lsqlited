@@ -1,0 +1,32 @@
+# EditorConfig: https://editorconfig.org
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# gofmt decides the formatting; these settings only make an editor agree with
+# it. The 120 limit is enforced by golangci-lint's lll, which counts a tab as
+# one character, so a ruler at 120 sits slightly right of the linter's view.
+[*.go]
+indent_style = tab
+indent_size = 4
+max_line_length = 120
+
+[{go.mod,go.sum}]
+indent_style = tab
+indent_size = 4
+
+[*.{yml,yaml}]
+indent_style = space
+indent_size = 2
+
+# Prose is left unwrapped, and trailing spaces are a hard line break in
+# Markdown, so neither is touched.
+[*.md]
+max_line_length = off
+trim_trailing_whitespace = false

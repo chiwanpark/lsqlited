@@ -6,8 +6,8 @@ import (
 	"time"
 )
 
-// stamp replaces the version baked in at build time for the duration of a
-// test, the way -ldflags does for a release build.
+// stamp replaces the version baked in at build time for the duration of a test, the way -ldflags does for a release
+// build.
 func stamp(t *testing.T, v string) {
 	t.Helper()
 	old := version
@@ -22,8 +22,7 @@ func TestString(t *testing.T) {
 		want    string
 	}{
 		{name: "stamped", stamped: "3.2534.7", want: "3.2534.7"},
-		// Guards against a release job passing the version with a stray
-		// newline, e.g. from a $(cat ...) substitution.
+		// Guards against a release job passing the version with a stray newline, e.g. from a $(cat ...) substitution.
 		{name: "surrounding whitespace is trimmed", stamped: "  1.2401.9\n", want: "1.2401.9"},
 	}
 	for _, tc := range cases {
@@ -36,8 +35,8 @@ func TestString(t *testing.T) {
 	}
 }
 
-// TestStringUnstamped covers a build that was not stamped, such as a local
-// `go build`: it must still answer, and say that it is a development build.
+// TestStringUnstamped covers a build that was not stamped, such as a local `go build`: it must still answer, and say
+// that it is a development build.
 func TestStringUnstamped(t *testing.T) {
 	stamp(t, "")
 
@@ -48,8 +47,8 @@ func TestStringUnstamped(t *testing.T) {
 	}
 }
 
-// TestYearWeek pins the ISO 8601 behaviour of the {yearweek} field, whose
-// interesting cases all sit at the turn of the year.
+// TestYearWeek pins the ISO 8601 behaviour of the {yearweek} field, whose interesting cases all sit at the turn of the
+// year.
 func TestYearWeek(t *testing.T) {
 	cases := []struct {
 		date time.Time

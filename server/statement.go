@@ -10,9 +10,8 @@ import (
 	"github.com/chiwanpark/lsqlited/internal/protocol"
 )
 
-// limits resolves the bounds for a request: the daemon's own safety net,
-// tightened by whatever the client asked for. A client can only ask for less,
-// never for more.
+// limits resolves the bounds for a request: the daemon's own safety net, tightened by whatever the client asked for. A
+// client can only ask for less, never for more.
 func (s *Server) limits(req *protocol.Request) statementLimits {
 	limits := s.cfg.Limits.resolve()
 	if req.TimeoutMS > 0 {
@@ -42,12 +41,11 @@ func (sess *session) handleStatement(ctx context.Context, req *protocol.Request)
 	}
 
 	limits := sess.srv.limits(req)
-	// The statement runs under a context so that SQLite is interrupted when
-	// the deadline passes, rather than the result merely being abandoned.
+	// The statement runs under a context so that SQLite is interrupted when the deadline passes, rather than the result
+	// merely being abandoned.
 	ctx, cancel := statementContext(ctx, limits.timeout)
 	defer cancel()
-	// Nothing else is read from the connection meanwhile, so the reader is
-	// free for the watcher.
+	// Nothing else is read from the connection meanwhile, so the reader is free for the watcher.
 	stop := sess.peer.watch(cancel)
 
 	var resp *protocol.Response
@@ -66,8 +64,8 @@ func (sess *session) handleStatement(ctx context.Context, req *protocol.Request)
 	return resp
 }
 
-// statementContext derives the context a statement runs under. A zero timeout
-// leaves it unbounded, as it is when nothing is configured.
+// statementContext derives the context a statement runs under. A zero timeout leaves it unbounded, as it is when
+// nothing is configured.
 func statementContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	if timeout <= 0 {
 		return context.WithCancel(ctx)
@@ -89,11 +87,9 @@ func runQuery(ctx context.Context, q queryer, query string, args []any, limits s
 	resp := &protocol.Response{Columns: cols, ColumnTypes: columnTypes(rows)}
 	for rows.Next() {
 		if limits.maxRows > 0 && int64(len(resp.Rows)) >= limits.maxRows {
-			// Row N+1 exists. Closing the rows interrupts the statement, so
-			// the rest of the result is never computed.
+			// Row N+1 exists. Closing the rows interrupts the statement, so the rest of the result is never computed.
 			rows.Close()
-			return codeResponse(protocol.CodeTooManyRows,
-				"result exceeds the row limit of %d", limits.maxRows)
+			return codeResponse(protocol.CodeTooManyRows, "result exceeds the row limit of %d", limits.maxRows)
 		}
 		vals := make([]any, len(cols))
 		ptrs := make([]any, len(cols))
@@ -133,10 +129,9 @@ func runExec(ctx context.Context, q queryer, query string, args []any, limits st
 	return resp
 }
 
-// columnTypes reports the declared type of every column; expressions,
-// literals and aggregates have none and come back empty. Types are read from
-// the statement rather than from the values, so they are reported even for a
-// result with no rows.
+// columnTypes reports the declared type of every column; expressions, literals and aggregates have none and come back
+// empty. Types are read from the statement rather than from the values, so they are reported even for a result with no
+// rows.
 func columnTypes(rows *sql.Rows) []string {
 	types, err := rows.ColumnTypes()
 	if err != nil {
@@ -149,9 +144,8 @@ func columnTypes(rows *sql.Rows) []string {
 	return out
 }
 
-// errResponse reports a failure the client cannot classify. The message is
-// passed through verbatim, so SQLite's own wording reaches whoever wrote the
-// statement.
+// errResponse reports a failure the client cannot classify. The message is passed through verbatim, so SQLite's own
+// wording reaches whoever wrote the statement.
 func errResponse(err error) *protocol.Response {
 	return &protocol.Response{Error: err.Error()}
 }
@@ -161,13 +155,13 @@ func codeResponse(code, format string, args ...any) *protocol.Response {
 	return &protocol.Response{Error: fmt.Sprintf(format, args...), Code: code}
 }
 
-// statementResponse classifies the failure of a statement or a transaction,
-// keeping SQLite's own message and adding only the code.
+// statementResponse classifies the failure of a statement or a transaction, keeping SQLite's own message and adding
+// only the code.
 func statementResponse(ctx context.Context, err error, timeout time.Duration) *protocol.Response {
 	switch {
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		// SQLite reports the interruption in its own words, which say nothing
-		// about a deadline; the code is what tells the client.
+		// SQLite reports the interruption in its own words, which say nothing about a deadline; the code is what tells the
+		// client.
 		return codeResponse(protocol.CodeTimeout, "statement exceeded the time limit of %s", timeout)
 	case isBusy(err):
 		return &protocol.Response{Error: err.Error(), Code: protocol.CodeBusy}

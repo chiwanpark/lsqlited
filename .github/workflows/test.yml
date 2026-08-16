@@ -54,6 +54,11 @@ jobs:
         go-version: "1.26"
         cache: true
 
+    - name: Run golangci-lint
+      uses: golangci/golangci-lint-action@v9
+      with:
+        version: v2.12
+
     - name: Check formatting
       run: |
         unformatted="$(gofmt -l .)"

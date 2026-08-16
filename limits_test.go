@@ -12,21 +12,18 @@ import (
 	"github.com/chiwanpark/lsqlited/server"
 )
 
-// forever is a statement that never finishes on its own, so an answer to it
-// is proof that the daemon interrupted it.
+// forever is a statement that never finishes on its own, so an answer to it is proof that the daemon interrupted it.
 const forever = `WITH RECURSIVE spin(x) AS (
 	SELECT 1 UNION ALL SELECT x + 1 FROM spin
 ) SELECT count(*) FROM spin`
 
-// startLimitedServer serves the default databases under the given
-// server-wide limits.
+// startLimitedServer serves the default databases under the given server-wide limits.
 func startLimitedServer(t *testing.T, limits server.Limits) string {
 	t.Helper()
 	return serve(t, &server.Config{Limits: limits})
 }
 
-// startLimitedServerWithParams opens the database with the given SQLite
-// parameters.
+// startLimitedServerWithParams opens the database with the given SQLite parameters.
 func startLimitedServerWithParams(t *testing.T, params server.Params) string {
 	t.Helper()
 	return serve(t, &server.Config{Params: params})
@@ -51,8 +48,7 @@ func TestQueryTimeoutFromDSN(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Errorf("query took %s, want it soon after the 300ms limit", elapsed)
 	}
-	// The daemon interrupted the statement rather than abandoning it, so
-	// the connection is immediately good for more work.
+	// The daemon interrupted the statement rather than abandoning it, so the connection is immediately good for more work.
 	var n int
 	if err := db.QueryRow("SELECT 1").Scan(&n); err != nil {
 		t.Fatalf("query after timeout: %v", err)
@@ -60,9 +56,8 @@ func TestQueryTimeoutFromDSN(t *testing.T) {
 }
 
 func TestQueryTimeoutFromServerConfig(t *testing.T) {
-	// The daemon's own limit holds even though the client asks for nothing.
-	// The configuration counts in seconds, so one is the shortest it can ask
-	// for.
+	// The daemon's own limit holds even though the client asks for nothing. The configuration counts in seconds, so one is
+	// the shortest it can ask for.
 	addr := startLimitedServer(t, server.Limits{QueryTimeout: 1})
 	db := openDB(t, addr, "test")
 
@@ -92,8 +87,7 @@ func TestQueryTimeoutFromContext(t *testing.T) {
 	defer cancel()
 	start := time.Now()
 	_, err := db.QueryContext(ctx, forever)
-	// Both sides are counting the same 300ms, so either the server's answer
-	// or the caller's own deadline may arrive first.
+	// Both sides are counting the same 300ms, so either the server's answer or the caller's own deadline may arrive first.
 	if !errors.Is(err, lsqlited.ErrTimeout) && !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("query error = %v, want ErrTimeout or DeadlineExceeded", err)
 	}
@@ -192,8 +186,7 @@ func TestColumnTypes(t *testing.T) {
 		query string
 	}{
 		{name: "with rows", query: query},
-		// Types come from the statement, not from the values, so an empty
-		// result still describes its columns.
+		// Types come from the statement, not from the values, so an empty result still describes its columns.
 		{name: "without rows", query: query + " WHERE 1 = 0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -230,8 +223,7 @@ func TestServerErrorDetails(t *testing.T) {
 	if !errors.As(err, &serverErr) {
 		t.Fatalf("query error = %v (%T), want *lsqlited.ServerError", err, err)
 	}
-	// SQLite's own wording reaches the caller, so an application can show it
-	// to whoever wrote the statement.
+	// SQLite's own wording reaches the caller, so an application can show it to whoever wrote the statement.
 	if serverErr.Message != "no such column: nope" {
 		t.Errorf("message = %q, want %q", serverErr.Message, "no such column: nope")
 	}
@@ -266,8 +258,8 @@ func TestTimeoutErrorDetails(t *testing.T) {
 	}
 }
 
-// TestWithoutLimits checks that a client and a server that say nothing about
-// limits behave the way they did before limits existed.
+// TestWithoutLimits checks that a client and a server that say nothing about limits behave the way they did before
+// limits existed.
 func TestWithoutLimits(t *testing.T) {
 	addr := startServer(t)
 	db := openDB(t, addr, "test")

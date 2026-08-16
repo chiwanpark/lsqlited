@@ -1,5 +1,4 @@
-// Package tlsutil holds the small pieces of TLS plumbing shared by the
-// lsqlited server and the database/sql driver.
+// Package tlsutil holds the small pieces of TLS plumbing shared by the lsqlited server and the database/sql driver.
 package tlsutil
 
 import (
@@ -10,13 +9,12 @@ import (
 	"strings"
 )
 
-// MinVersion is the lowest TLS version lsqlited will negotiate. TLS 1.0 and
-// 1.1 are deprecated and deliberately not offered.
+// MinVersion is the lowest TLS version lsqlited will negotiate. TLS 1.0 and 1.1 are deprecated and deliberately not
+// offered.
 const MinVersion = tls.VersionTLS12
 
-// ParseVersion maps a configuration string such as "1.3" to the matching
-// crypto/tls constant, accepting the common spellings ("TLSv1.2" and so on).
-// An empty string selects MinVersion.
+// ParseVersion maps a configuration string such as "1.3" to the matching crypto/tls constant, accepting the common
+// spellings ("TLSv1.2" and so on). An empty string selects MinVersion.
 func ParseVersion(s string) (uint16, error) {
 	switch normalizeVersion(s) {
 	case "":
@@ -37,9 +35,8 @@ func normalizeVersion(s string) string {
 	return s
 }
 
-// LoadCertPool reads a PEM bundle and returns it as an x509 pool. It fails
-// when the file holds no certificate at all, since an empty pool would
-// silently reject every peer.
+// LoadCertPool reads a PEM bundle and returns it as an x509 pool. It fails when the file holds no certificate at all,
+// since an empty pool would silently reject every peer.
 func LoadCertPool(path string) (*x509.CertPool, error) {
 	pem, err := os.ReadFile(path)
 	if err != nil {
@@ -52,9 +49,8 @@ func LoadCertPool(path string) (*x509.CertPool, error) {
 	return pool, nil
 }
 
-// VerifyChain returns a tls.Config.VerifyConnection callback that checks the
-// peer chain against roots (the system pool when nil) without checking the
-// host name. It is what separates "verify-ca" from "verify-full".
+// VerifyChain returns a tls.Config.VerifyConnection callback that checks the peer chain against roots (the system pool
+// when nil) without checking the host name. It is what separates "verify-ca" from "verify-full".
 func VerifyChain(roots *x509.CertPool) func(tls.ConnectionState) error {
 	return func(state tls.ConnectionState) error {
 		if len(state.PeerCertificates) == 0 {
