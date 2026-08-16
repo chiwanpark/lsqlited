@@ -3,6 +3,7 @@ package protocol
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"reflect"
 	"testing"
 	"time"
@@ -75,6 +76,47 @@ func TestMessageRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, req) {
 		t.Errorf("round trip: got %#v, want %#v", got, req)
+	}
+}
+
+// TestCompatibility pins the two directions of the additive fields: a peer
+// that does not know them must not be able to tell, and a peer that does must
+// cope with their absence.
+func TestCompatibility(t *testing.T) {
+	// A request without limits is on the wire exactly as it was before they
+	// existed, so an older server sees nothing new.
+	req := Request{Type: TypeQuery, Database: "app", Query: "SELECT 1"}
+	encoded, err := json.Marshal(&req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	const want = `{"type":"query","database":"app","query":"SELECT 1"}`
+	if string(encoded) != want {
+		t.Errorf("request = %s, want %s", encoded, want)
+	}
+
+	// A response from a server that predates the new fields decodes with
+	// them empty rather than failing.
+	var resp Response
+	old := `{"columns":["v"],"rows":[[{"t":"text","v":"hello"}]]}`
+	if err := json.Unmarshal([]byte(old), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.ColumnTypes != nil {
+		t.Errorf("column types = %v, want none", resp.ColumnTypes)
+	}
+	if resp.Code != "" {
+		t.Errorf("code = %q, want none", resp.Code)
+	}
+
+	// A request from a client that predates them leaves the limits unset,
+	// which is what "the client imposes no limit" looks like.
+	var decoded Request
+	if err := json.Unmarshal([]byte(want), &decoded); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+	if decoded.TimeoutMS != 0 || decoded.MaxRows != 0 {
+		t.Errorf("limits = %d/%d, want 0/0", decoded.TimeoutMS, decoded.MaxRows)
 	}
 }
 

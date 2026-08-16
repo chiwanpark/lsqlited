@@ -27,6 +27,9 @@ listen:
 
 params: _journal_mode=WAL # SQLite open parameters for every database
 
+query_timeout: 60         # interrupt any statement running longer, in seconds
+max_rows: 5000            # refuse a result larger than this
+
 extensions:               # loadable extensions for every database
 - /usr/lib/sqlite3/vector0.so
 
@@ -68,6 +71,38 @@ params:
 ```
 
 Parameters are appended to the `file:` URI handed to SQLite, so anything the [go-sqlite3 driver](https://pkg.go.dev/github.com/mattn/go-sqlite3#hdr-Connection_String) understands works — `mode`, `immutable`, `cache`, `vfs`, `_journal_mode`, `_foreign_keys`, `_txlock`, and so on.
+
+### Limits
+
+A daemon shared by several clients needs a way to stop one statement from taking the whole process with it. Three keys bound what a single statement may do; each can be set at the top level, applying to every database, and under `databases.<name>`, applying to one:
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `query_timeout` | integer (seconds) | unset (unlimited) | Upper bound on how long a statement may run |
+| `max_rows` | integer | unset (unlimited) | Upper bound on the rows in one result |
+| `max_response_bytes` | integer | 64 MiB | Upper bound on an encoded response body |
+
+```yaml
+query_timeout: 60       # seconds
+max_rows: 5000
+
+databases:
+  app:
+    path: /var/lib/lsqlited/app.sqlite3
+  reports:
+    path: /var/lib/lsqlited/reports.sqlite3
+    query_timeout: 300  # reports may run longer
+    max_rows: 1000      # but must return less
+```
+
+```go
+switch {
+case errors.Is(err, lsqlited.ErrTimeout):
+	// the statement was interrupted
+case errors.Is(err, lsqlited.ErrTooManyRows), errors.Is(err, lsqlited.ErrResponseTooLarge):
+	// the result was too big to return
+}
+```
 
 ### Extensions
 
@@ -212,6 +247,8 @@ lsqlited://[user:password@]host:port/database[?param=value&...]
 | Parameter | Default | Description |
 | --- | --- | --- |
 | `dial_timeout` | `10s` | TCP connect and TLS handshake timeout |
+| `query_timeout` | none | Server-side time limit for a statement, as a duration (`30s`) |
+| `max_rows` | `0` | Largest result the server may return, `0` for no limit |
 | `ssl_mode` | `disable` | `disable`, `require`, `verify-ca`, or `verify-full` |
 | `ssl_ca` | system pool | PEM bundle of CAs trusted to sign the server certificate |
 | `ssl_cert` | | Client certificate presented for mutual TLS |
@@ -227,7 +264,29 @@ The SSL modes follow the familiar libpq semantics:
 | `verify-ca` | yes | yes | no |
 | `verify-full` | yes | yes | yes |
 
-Transactions (`db.Begin` / `db.BeginTx`), prepared statements, and context cancellation are supported. Query parameters are positional (`?`); named parameters are not supported.
+Transactions (`db.Begin` / `db.BeginTx`), prepared statements, and context cancellation are supported. Query parameters are positional (`?`); named parameters are not supported. `Rows.ColumnTypes` reports the declared SQLite type of each column — `INTEGER`, `TEXT`, and so on, empty for an expression, a literal or an aggregate — including for a result with no rows.
+
+`query_timeout` bounds a statement whose context carries no deadline of its own. When it does carry one, the remaining time is sent instead, so an ordinary `context.WithTimeout` bounds the work inside the daemon as well:
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+rows, err := db.QueryContext(ctx, "SELECT ...") // the daemon gets the 5s too
+```
+
+### Errors
+
+A request the server rejects comes back as a `*ServerError`, which carries the server's message unchanged — usually SQLite's own wording, which is what an application shows to whoever wrote the statement:
+
+```go
+var serverErr *lsqlited.ServerError
+if errors.As(err, &serverErr) {
+	fmt.Println(serverErr.Message) // "no such column: foo"
+	fmt.Println(serverErr.Code)    // "", "timeout", "too_many_rows", "response_too_large"
+}
+```
+
+The classified ones also match a sentinel under `errors.Is`: `ErrTimeout`, `ErrTooManyRows`, and `ErrResponseTooLarge`. Everything else — dialing, I/O, protocol failures — surfaces as the underlying error.
 
 ## Wire Protocol
 
@@ -239,14 +298,24 @@ Request:
 
 ```json
 {"type": "query", "database": "app", "query": "SELECT v FROM kv WHERE k = ?",
- "args": [{"t": "text", "v": "greeting"}]}
+ "args": [{"t": "text", "v": "greeting"}], "timeout_ms": 5000, "max_rows": 5000}
 ```
 
 Response:
 
 ```json
-{"columns": ["v"], "rows": [[{"t": "text", "v": "hello"}]]}
+{"columns": ["v"], "column_types": ["TEXT"], "rows": [[{"t": "text", "v": "hello"}]]}
 ```
+
+`timeout_ms` and `max_rows` are the limits the client asks for; the server enforces the tighter of those and its own. Both are optional, and a request that omits them is bounded by the server's configuration alone. `column_types` is parallel to `columns` and holds each column's declared type, empty where there is none.
+
+A failed request answers with `error`, and with `code` when the reason is one the client can act on:
+
+```json
+{"error": "result exceeds the row limit of 5000", "code": "too_many_rows"}
+```
+
+The codes are `timeout`, `too_many_rows`, and `response_too_large`; `error` carries the underlying message with no prefix. A request that is canceled because the client hung up gets no answer at all, there being nobody left to answer.
 
 Request types are `ping`, `query`, `exec`, `begin`, `commit`, `rollback`, `auth_init`, and `auth`. Values are tagged (`null`, `int`, `float`, `bool`, `text`, `blob`, `time`) and transported as strings to preserve full `int64` precision; blobs are base64-encoded and times use RFC 3339.
 
@@ -264,7 +333,8 @@ When the server has authentication enabled, a session must complete the `auth_in
 
 ## Limitations
 
-- Query results are fully buffered in memory before being sent, so very large result sets are subject to the 64 MiB message limit.
+- Query results are fully buffered in memory before being sent, so very large result sets are subject to `max_response_bytes` and, above it, the 64 MiB message limit.
+- Limits bound one statement at a time; the daemon does not cap the number of statements running at once.
 - Access control is per database, not per table or per statement: an account that may reach a database may read and write all of it. Use `params: mode=ro` to serve a database read-only to everyone.
 - Extensions are loaded from the configuration file only, and a change to the list takes effect when the daemon restarts.
 - Named query parameters and custom transaction isolation levels are not supported.

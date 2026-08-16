@@ -62,6 +62,60 @@ databases:
 	}
 }
 
+func TestLoadConfigLimits(t *testing.T) {
+	path := writeConfig(t, `
+listen: {port: 7890}
+query_timeout: 60
+max_rows: 5000
+max_response_bytes: 1048576
+databases:
+  app:
+    path: /tmp/app.sqlite3
+  reports:
+    path: /tmp/reports.sqlite3
+    query_timeout: 90
+    max_rows: 100
+    max_response_bytes: 4096
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	want := Limits{QueryTimeout: 60, MaxRows: 5000, MaxResponseBytes: 1 << 20}
+	if cfg.Limits != want {
+		t.Errorf("server limits = %+v, want %+v", cfg.Limits, want)
+	}
+	if got := cfg.Databases["app"].Limits; got != (Limits{}) {
+		t.Errorf("app limits = %+v, want none", got)
+	}
+	wantDB := Limits{QueryTimeout: 90, MaxRows: 100, MaxResponseBytes: 4096}
+	if got := cfg.Databases["reports"].Limits; got != wantDB {
+		t.Errorf("reports limits = %+v, want %+v", got, wantDB)
+	}
+
+	// A configuration that says nothing about limits leaves statements
+	// unbounded, apart from the response size the protocol imposes anyway.
+	silent := writeConfig(t, `
+listen: {port: 7890}
+databases:
+  app: {path: /tmp/app.sqlite3}
+`)
+	cfg, err = LoadConfig(silent)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Limits != (Limits{}) {
+		t.Errorf("limits = %+v, want none", cfg.Limits)
+	}
+	resolved := cfg.Limits.resolve(cfg.Databases["app"].Limits)
+	if resolved.timeout != 0 || resolved.maxRows != 0 {
+		t.Errorf("resolved limits = %+v, want unbounded time and rows", resolved)
+	}
+	if resolved.maxResponseBytes != DefaultMaxResponseBytes {
+		t.Errorf("maxResponseBytes = %d, want %d", resolved.maxResponseBytes, int64(DefaultMaxResponseBytes))
+	}
+}
+
 func TestLoadConfigParamsScalarTypes(t *testing.T) {
 	path := writeConfig(t, `
 listen: {port: 7890}
@@ -187,6 +241,46 @@ listen: {port: 7890}
 params: "mode=%zz"
 databases:
   app: {path: /tmp/app.sqlite3}
+`,
+		"query timeout with a unit": `
+listen: {port: 7890}
+query_timeout: 60s
+databases:
+  app: {path: /tmp/app.sqlite3}
+`,
+		"malformed query timeout": `
+listen: {port: 7890}
+query_timeout: soon
+databases:
+  app: {path: /tmp/app.sqlite3}
+`,
+		"negative query timeout": `
+listen: {port: 7890}
+query_timeout: -5
+databases:
+  app: {path: /tmp/app.sqlite3}
+`,
+		"negative max rows": `
+listen: {port: 7890}
+max_rows: -1
+databases:
+  app: {path: /tmp/app.sqlite3}
+`,
+		"response size beyond the frame limit": `
+listen: {port: 7890}
+max_response_bytes: 134217728
+databases:
+  app: {path: /tmp/app.sqlite3}
+`,
+		"negative database max rows": `
+listen: {port: 7890}
+databases:
+  app: {path: /tmp/app.sqlite3, max_rows: -1}
+`,
+		"malformed database query timeout": `
+listen: {port: 7890}
+databases:
+  app: {path: /tmp/app.sqlite3, query_timeout: 30s}
 `,
 		"empty global param name": `
 listen: {port: 7890}

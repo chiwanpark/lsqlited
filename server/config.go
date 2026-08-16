@@ -8,11 +8,18 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/chiwanpark/lsqlited/internal/auth"
+	"github.com/chiwanpark/lsqlited/internal/protocol"
 )
+
+// DefaultMaxResponseBytes bounds an encoded response body when the
+// configuration is silent. It matches the frame limit of the wire protocol,
+// which no response can exceed anyway.
+const DefaultMaxResponseBytes = protocol.MaxMessageSize
 
 // Config is the top-level server configuration, usually loaded from a YAML
 // file. Example:
@@ -21,6 +28,8 @@ import (
 //	  host: 127.0.0.1
 //	  port: 7890
 //	params: _journal_mode=WAL
+//	query_timeout: 60
+//	max_rows: 5000
 //	extensions: [/usr/lib/sqlite3/vector0.so]
 //	tls:
 //	  cert: /etc/lsqlited/server.crt
@@ -36,8 +45,12 @@ import (
 //	  archive:
 //	    path: /var/lib/lsqlited/archive.sqlite3
 //	    params: mode=ro&immutable=true
+//	    max_rows: 1000
 type Config struct {
 	Listen ListenConfig `yaml:"listen"`
+	// Limits bound the work a single statement may do. They apply to every
+	// database, unless the database sets its own.
+	Limits `yaml:",inline"`
 	// Params are SQLite DSN query parameters applied to every database.
 	// Per-database params take precedence over them.
 	Params Params `yaml:"params"`
@@ -219,6 +232,83 @@ func sortedKeys[V any](m map[string]V) []string {
 	return keys
 }
 
+// Limits bound the work a single statement may do. They are the daemon's own
+// safety net: a client may ask for a tighter bound, but never for a looser
+// one. Every field may be set at the top level of the configuration and
+// under databases.<name>.
+type Limits struct {
+	// QueryTimeout is the upper bound on how long a single statement may
+	// run, in seconds. Zero (the default) leaves statements unbounded.
+	QueryTimeout int64 `yaml:"query_timeout"`
+	// MaxRows is the upper bound on the number of rows one query result may
+	// carry. Zero (the default) leaves results unbounded.
+	MaxRows int64 `yaml:"max_rows"`
+	// MaxResponseBytes is the upper bound on an encoded response body. Zero
+	// selects DefaultMaxResponseBytes; the value can be lowered but not
+	// raised beyond the frame limit of the protocol.
+	MaxResponseBytes int64 `yaml:"max_response_bytes"`
+}
+
+// statementLimits are the bounds that apply to one statement, once the
+// configuration and the client's request have been reconciled. The timeout
+// is a duration here because a client may ask for finer granularity than the
+// whole seconds the configuration is written in.
+type statementLimits struct {
+	timeout          time.Duration
+	maxRows          int64
+	maxResponseBytes int64
+}
+
+// resolve combines the server-wide limits in l with those of a database,
+// which win where they are set, and applies the default response size.
+func (l Limits) resolve(db Limits) statementLimits {
+	resolved := statementLimits{
+		timeout:          time.Duration(minNonZero(l.QueryTimeout, db.QueryTimeout)) * time.Second,
+		maxRows:          minNonZero(l.MaxRows, db.MaxRows),
+		maxResponseBytes: db.MaxResponseBytes,
+	}
+	if resolved.maxResponseBytes == 0 {
+		resolved.maxResponseBytes = l.MaxResponseBytes
+	}
+	if resolved.maxResponseBytes <= 0 || resolved.maxResponseBytes > DefaultMaxResponseBytes {
+		resolved.maxResponseBytes = DefaultMaxResponseBytes
+	}
+	return resolved
+}
+
+// validate rejects negative bounds and response sizes the protocol could not
+// carry, so that a configuration mistake is caught at load time.
+func (l Limits) validate() error {
+	if l.QueryTimeout < 0 {
+		return fmt.Errorf("query_timeout must not be negative, got %d", l.QueryTimeout)
+	}
+	if l.MaxRows < 0 {
+		return fmt.Errorf("max_rows must not be negative, got %d", l.MaxRows)
+	}
+	if l.MaxResponseBytes < 0 {
+		return fmt.Errorf("max_response_bytes must not be negative, got %d", l.MaxResponseBytes)
+	}
+	if l.MaxResponseBytes > DefaultMaxResponseBytes {
+		return fmt.Errorf("max_response_bytes must not exceed %d, got %d",
+			int64(DefaultMaxResponseBytes), l.MaxResponseBytes)
+	}
+	return nil
+}
+
+// minNonZero returns the smaller of two bounds, reading zero as "no bound".
+func minNonZero[T int64 | time.Duration](a, b T) T {
+	switch {
+	case a == 0:
+		return b
+	case b == 0:
+		return a
+	case b < a:
+		return b
+	default:
+		return a
+	}
+}
+
 // ListenConfig configures the TCP listener.
 type ListenConfig struct {
 	// Host is the address to bind to. An empty host binds to all interfaces.
@@ -231,6 +321,9 @@ type ListenConfig struct {
 type DatabaseConfig struct {
 	// Path is the filesystem path of the SQLite database file.
 	Path string `yaml:"path"`
+	// Limits bound the work a single statement on this database may do,
+	// overriding the server-wide values.
+	Limits `yaml:",inline"`
 	// Params are extra SQLite DSN query parameters appended to the
 	// "file:" URI used to open the database, e.g. mode=ro or
 	// immutable=true. They override the server-wide Config.Params. See the
@@ -499,6 +592,9 @@ func (c *Config) Validate() error {
 	if err := c.Params.validate(); err != nil {
 		return fmt.Errorf("params: %w", err)
 	}
+	if err := c.Limits.validate(); err != nil {
+		return err
+	}
 	if err := c.Extensions.validate(); err != nil {
 		return fmt.Errorf("extensions%w", err)
 	}
@@ -520,6 +616,9 @@ func (c *Config) Validate() error {
 		}
 		if err := db.Extensions.validate(); err != nil {
 			return fmt.Errorf("databases.%s.extensions%w", name, err)
+		}
+		if err := db.Limits.validate(); err != nil {
+			return fmt.Errorf("databases.%s.%w", name, err)
 		}
 	}
 	// Validated last so that grants are checked against known-good databases.

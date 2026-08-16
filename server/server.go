@@ -3,6 +3,7 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"database/sql"
@@ -16,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chiwanpark/lsqlited/internal/auth"
@@ -267,18 +269,28 @@ func (s *Server) handleConn(conn net.Conn) {
 		return
 	}
 
-	sess := &session{srv: s, logger: logger}
+	// Requests are read through a buffered reader so that a statement can be
+	// watched for the peer hanging up: Peek blocks without consuming, which
+	// leaves a pipelined request in place for the loop below.
+	br := bufio.NewReader(conn)
+	sess := &session{srv: s, logger: logger, peer: &peer{conn: conn, br: br}}
 	defer sess.cleanup()
 
 	for {
 		var req protocol.Request
-		if err := protocol.ReadMessage(conn, &req); err != nil {
+		if err := protocol.ReadMessage(br, &req); err != nil {
 			if err != io.EOF && !errors.Is(err, net.ErrClosed) {
 				logger.Debug("read request failed", "error", err)
 			}
 			return
 		}
 		resp := sess.handle(ctx, &req)
+		if resp == nil {
+			// The client vanished while its statement ran, so there is
+			// nobody left to answer.
+			logger.Debug("client disconnected during statement")
+			return
+		}
 		if err := protocol.WriteMessage(conn, resp); err != nil {
 			if !errors.Is(err, net.ErrClosed) {
 				logger.Debug("write response failed", "error", err)
@@ -437,12 +449,57 @@ type queryer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
+// peer is the client end of a connection: the socket and the buffered reader
+// the request loop reads from.
+type peer struct {
+	conn net.Conn
+	br   *bufio.Reader
+}
+
+// watch cancels a running statement when the client goes away, so that work
+// nobody will collect does not keep a core busy. It returns a stop function
+// that must be called before the request loop reads again, and which reports
+// whether the connection is gone.
+//
+// Peek does not consume, so a request the client pipelined behind the current
+// one is still there afterwards. The blocked Peek is released with a read
+// deadline rather than by closing the connection, since the connection is
+// still wanted when the statement finishes first; the deadline is lifted
+// again before the loop resumes.
+func (p *peer) watch(cancel context.CancelFunc) (stop func() (gone bool)) {
+	if p == nil {
+		return func() bool { return false }
+	}
+	var gone, stopping atomic.Bool
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// A read error means the peer hung up, unless it is the deadline
+		// this watcher was asked to stop with.
+		if _, err := p.br.Peek(1); err != nil && !stopping.Load() {
+			gone.Store(true)
+			cancel()
+		}
+	}()
+	return func() bool {
+		stopping.Store(true)
+		p.conn.SetReadDeadline(time.Now())
+		<-done
+		p.conn.SetReadDeadline(time.Time{})
+		return gone.Load()
+	}
+}
+
 // session holds per-connection state, most importantly the authenticated
 // user and an in-progress transaction, if any.
 type session struct {
 	srv    *Server
 	logger *slog.Logger
 	tx     *sql.Tx
+	// peer is the connection the session serves. It is nil when there is no
+	// connection to watch, which leaves statements running until they finish
+	// or time out.
+	peer *peer
 
 	// user is the authenticated account name, empty until the handshake
 	// completes, and account is the matching entry from the configuration.
@@ -468,6 +525,8 @@ func (sess *session) cleanup() {
 	}
 }
 
+// handle answers a single request. It returns nil when the client
+// disconnected while its statement ran and no response is owed.
 func (sess *session) handle(ctx context.Context, req *protocol.Request) *protocol.Response {
 	switch req.Type {
 	case protocol.TypeAuthInit:
@@ -621,6 +680,21 @@ func (sess *session) handleRollback() *protocol.Response {
 	return &protocol.Response{}
 }
 
+// limits resolves the bounds that apply to a request: the daemon's own
+// safety net for the database it names, tightened by whatever the client
+// asked for. A client can only ask for less, never for more.
+func (s *Server) limits(req *protocol.Request) statementLimits {
+	limits := s.cfg.Limits.resolve(s.cfg.Databases[req.Database].Limits)
+	if req.TimeoutMS > 0 {
+		requested := time.Duration(req.TimeoutMS) * time.Millisecond
+		limits.timeout = minNonZero(limits.timeout, requested)
+	}
+	if req.MaxRows > 0 {
+		limits.maxRows = minNonZero(limits.maxRows, req.MaxRows)
+	}
+	return limits
+}
+
 func (sess *session) handleStatement(ctx context.Context, req *protocol.Request) *protocol.Response {
 	args, err := protocol.DecodeValues(req.Args)
 	if err != nil {
@@ -636,13 +710,45 @@ func (sess *session) handleStatement(ctx context.Context, req *protocol.Request)
 		}
 		q = db
 	}
+
+	limits := sess.srv.limits(req)
+	// The statement runs under a context so that SQLite is interrupted when
+	// the deadline passes, rather than the result merely being abandoned.
+	ctx, cancel := statementContext(ctx, limits.timeout)
+	defer cancel()
+	// Nothing else is read from the connection while the statement runs, so
+	// the reader is free for the watcher.
+	stop := sess.peer.watch(cancel)
+
+	var resp *protocol.Response
 	if req.Type == protocol.TypeQuery {
-		return runQuery(ctx, q, req.Query, args)
+		resp = runQuery(ctx, q, req.Query, args, limits)
+	} else {
+		resp = runExec(ctx, q, req.Query, args)
 	}
-	return runExec(ctx, q, req.Query, args)
+
+	if stop() {
+		return nil
+	}
+	if resp.Error != "" && resp.Code == "" && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		// SQLite reports the interruption in its own words; the code is
+		// what tells the client it ran out of time.
+		sess.logger.Debug("statement timed out", "database", req.Database, "timeout", limits.timeout)
+		return codeResponse(protocol.CodeTimeout, "statement exceeded the time limit of %s", limits.timeout)
+	}
+	return resp
 }
 
-func runQuery(ctx context.Context, q queryer, query string, args []any) *protocol.Response {
+// statementContext derives the context a statement runs under. A zero
+// timeout leaves it unbounded, as it is when nothing is configured.
+func statementContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
+func runQuery(ctx context.Context, q queryer, query string, args []any, limits statementLimits) *protocol.Response {
 	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return errResponse(err)
@@ -653,8 +759,18 @@ func runQuery(ctx context.Context, q queryer, query string, args []any) *protoco
 	if err != nil {
 		return errResponse(err)
 	}
-	resp := &protocol.Response{Columns: cols}
+	resp := &protocol.Response{Columns: cols, ColumnTypes: columnTypes(rows)}
+	// size grows with the result so that an oversized one is stopped while
+	// it is being built, before the memory has been spent on it.
+	size := envelopeSize(cols, resp.ColumnTypes)
 	for rows.Next() {
+		if limits.maxRows > 0 && int64(len(resp.Rows)) >= limits.maxRows {
+			// Row N+1 exists. Closing the rows interrupts the statement,
+			// so the rest of the result is never computed.
+			rows.Close()
+			return codeResponse(protocol.CodeTooManyRows,
+				"result exceeds the row limit of %d", limits.maxRows)
+		}
 		vals := make([]any, len(cols))
 		ptrs := make([]any, len(cols))
 		for i := range vals {
@@ -670,12 +786,65 @@ func runQuery(ctx context.Context, q queryer, query string, args []any) *protoco
 		if encoded == nil {
 			encoded = []protocol.Value{}
 		}
+		if size += rowSize(encoded); size > limits.maxResponseBytes {
+			rows.Close()
+			return codeResponse(protocol.CodeResponseTooLarge,
+				"result exceeds the response size limit of %d bytes", limits.maxResponseBytes)
+		}
 		resp.Rows = append(resp.Rows, encoded)
 	}
 	if err := rows.Err(); err != nil {
 		return errResponse(err)
 	}
 	return resp
+}
+
+// columnTypes reports the declared type of every column. Expressions,
+// literals and aggregates have none and come back empty. Types are read from
+// the statement rather than guessed from the values, so they are reported
+// even for a result with no rows.
+func columnTypes(rows *sql.Rows) []string {
+	types, err := rows.ColumnTypes()
+	if err != nil {
+		return nil
+	}
+	out := make([]string, len(types))
+	for i, t := range types {
+		out[i] = t.DatabaseTypeName()
+	}
+	return out
+}
+
+// JSON punctuation surrounding an encoded value, row and response. Sizes are
+// estimated rather than measured: escaping quotes and control characters can
+// make the real body a little larger, which is why the frame limit of the
+// protocol stays as the final backstop.
+const (
+	valueOverhead    = int64(len(`{"t":"","v":""},`))
+	rowOverhead      = int64(len(`[],`))
+	columnOverhead   = int64(len(`"",`))
+	envelopeOverhead = int64(len(`{"columns":[],"column_types":[],"rows":[]}`))
+)
+
+// envelopeSize estimates the encoded size of a result that carries no rows.
+func envelopeSize(cols, types []string) int64 {
+	size := envelopeOverhead
+	for _, name := range cols {
+		size += int64(len(name)) + columnOverhead
+	}
+	for _, name := range types {
+		size += int64(len(name)) + columnOverhead
+	}
+	return size
+}
+
+// rowSize estimates the encoded size of one row.
+func rowSize(vals []protocol.Value) int64 {
+	size := rowOverhead
+	for _, v := range vals {
+		size += int64(len(v.T)) + int64(len(v.V)) + valueOverhead
+	}
+	return size
 }
 
 func runExec(ctx context.Context, q queryer, query string, args []any) *protocol.Response {
@@ -693,6 +862,15 @@ func runExec(ctx context.Context, q queryer, query string, args []any) *protocol
 	return resp
 }
 
+// errResponse reports a failure whose cause the client cannot classify. The
+// message is passed through verbatim, so SQLite's own wording reaches the
+// user who wrote the statement.
 func errResponse(err error) *protocol.Response {
 	return &protocol.Response{Error: err.Error()}
+}
+
+// codeResponse reports a failure the client can act on, such as a statement
+// that ran out of time or a result that outgrew a limit.
+func codeResponse(code, format string, args ...any) *protocol.Response {
+	return &protocol.Response{Error: fmt.Sprintf(format, args...), Code: code}
 }

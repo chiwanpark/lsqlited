@@ -22,6 +22,9 @@
 // Supported parameters:
 //
 //	dial_timeout     TCP connect and TLS handshake timeout (default 10s)
+//	query_timeout    server-side time limit for a statement, e.g. 30s
+//	                 (default none)
+//	max_rows         largest result the server may return (default unlimited)
 //	ssl_mode         disable (default), require, verify-ca, or verify-full
 //	ssl_ca           PEM bundle of CAs trusted to sign the server certificate
 //	ssl_cert         client certificate presented for mutual TLS
@@ -32,6 +35,15 @@
 // DSN that points at a CA bundle is encrypted and verified by default:
 //
 //	lsqlited://alice:s3cret@db.example.com:7890/app?ssl_ca=/etc/ssl/ca.pem
+//
+// query_timeout applies to statements whose context carries no deadline: when
+// it does, the remaining time is sent instead, so a context.WithTimeout on
+// the caller's side bounds the work on the server too. The server enforces
+// its own limits as well, and the smaller one wins.
+//
+// A request the server refuses on one of those grounds comes back as a
+// *ServerError, which matches ErrTimeout, ErrTooManyRows or
+// ErrResponseTooLarge under errors.Is.
 package lsqlited
 
 import (
@@ -45,9 +57,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -101,6 +115,11 @@ type dsnConfig struct {
 	dialTimeout time.Duration
 	username    string
 	password    string
+	// queryTimeout bounds a statement on the server when the caller's
+	// context carries no deadline of its own. Zero asks for no limit.
+	queryTimeout time.Duration
+	// maxRows caps the rows a query may return. Zero asks for no limit.
+	maxRows int64
 	// tls is nil when the connection is plaintext.
 	tls *tls.Config
 }
@@ -155,6 +174,26 @@ func parseDSN(dsn string) (*dsnConfig, error) {
 		}
 		cfg.dialTimeout = timeout
 	}
+	if v := q.Get("query_timeout"); v != "" {
+		timeout, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("lsqlited: invalid DSN %q: bad query_timeout: %w", dsn, err)
+		}
+		if timeout < 0 {
+			return nil, fmt.Errorf("lsqlited: invalid DSN %q: query_timeout must not be negative", dsn)
+		}
+		cfg.queryTimeout = timeout
+	}
+	if v := q.Get("max_rows"); v != "" {
+		maxRows, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("lsqlited: invalid DSN %q: bad max_rows: %w", dsn, err)
+		}
+		if maxRows < 0 {
+			return nil, fmt.Errorf("lsqlited: invalid DSN %q: max_rows must not be negative", dsn)
+		}
+		cfg.maxRows = maxRows
+	}
 	ssl, err := parseSSLOptions(q)
 	if err != nil {
 		return nil, fmt.Errorf("lsqlited: invalid DSN %q: %w", dsn, err)
@@ -172,6 +211,8 @@ func parseDSN(dsn string) (*dsnConfig, error) {
 // would hand the caller a cleartext connection it believed was encrypted.
 var knownDSNParams = map[string]bool{
 	"dial_timeout":    true,
+	"query_timeout":   true,
+	"max_rows":        true,
 	"ssl_mode":        true,
 	"ssl_ca":          true,
 	"ssl_cert":        true,
@@ -217,7 +258,12 @@ func (c *connector) Connect(ctx context.Context) (driver.Conn, error) {
 	if nc, err = c.tlsHandshake(ctx, nc); err != nil {
 		return nil, err
 	}
-	cn := &conn{nc: nc, database: c.cfg.database}
+	cn := &conn{
+		nc:           nc,
+		database:     c.cfg.database,
+		queryTimeout: c.cfg.queryTimeout,
+		maxRows:      c.cfg.maxRows,
+	}
 	if c.cfg.username != "" {
 		if err := c.authenticate(ctx, cn); err != nil {
 			cn.Close()
@@ -323,12 +369,59 @@ func (c *connector) saltedPassword(salt []byte, iterations int) ([]byte, error) 
 	return salted, nil
 }
 
+// Sentinel errors for the failures a server classifies. Match them with
+// errors.Is on the error returned by a query:
+//
+//	if errors.Is(err, lsqlited.ErrTimeout) { ... }
+var (
+	// ErrTimeout means the statement was interrupted because it exceeded
+	// the time limit, whether the client's or the server's.
+	ErrTimeout = errors.New("lsqlited: query timed out")
+	// ErrTooManyRows means the result carried more rows than the limit
+	// allows. No rows come back with it.
+	ErrTooManyRows = errors.New("lsqlited: result exceeds the row limit")
+	// ErrResponseTooLarge means the encoded result outgrew the response size
+	// limit the server enforces.
+	ErrResponseTooLarge = errors.New("lsqlited: result exceeds the response size limit")
+)
+
+// ServerError is returned when the server rejects a request. Message holds
+// the server's own wording, typically SQLite's ("no such column: foo"), which
+// is what an application shows to whoever wrote the statement.
+type ServerError struct {
+	// Code classifies the failure. It is one of the protocol codes, and is
+	// empty for errors that carry no classification, including every error
+	// from a server that predates them.
+	Code string
+	// Message is the server's message, with no driver prefix.
+	Message string
+}
+
+func (e *ServerError) Error() string { return "lsqlited: server error: " + e.Message }
+
+// Is matches the sentinel that corresponds to the error's code, so that
+// errors.Is(err, ErrTimeout) works without unwrapping the error by hand.
+func (e *ServerError) Is(target error) bool {
+	switch e.Code {
+	case protocol.CodeTimeout:
+		return target == ErrTimeout
+	case protocol.CodeTooManyRows:
+		return target == ErrTooManyRows
+	case protocol.CodeResponseTooLarge:
+		return target == ErrResponseTooLarge
+	default:
+		return false
+	}
+}
+
 // conn is a single client connection. database/sql guarantees that a conn is
 // used by at most one goroutine at a time, but the mutex additionally guards
 // against interleaved frames.
 type conn struct {
-	nc       net.Conn
-	database string
+	nc           net.Conn
+	database     string
+	queryTimeout time.Duration
+	maxRows      int64
 
 	mu     sync.Mutex
 	closed bool
@@ -357,11 +450,22 @@ func (c *conn) roundTrip(ctx context.Context, req *protocol.Request) (*protocol.
 		return nil, err
 	}
 
-	// Interrupt blocking I/O when the context is canceled.
+	// Interrupt blocking I/O when the context is canceled, and lift the
+	// deadline again once the request is over. Waiting for the callback to
+	// finish is what keeps a request that completed in the very instant the
+	// context expired from leaving a deadline in the past behind it, which
+	// the next user of the connection would trip over.
+	interrupted := make(chan struct{})
 	stop := context.AfterFunc(ctx, func() {
+		defer close(interrupted)
 		c.nc.SetDeadline(time.Now())
 	})
-	defer stop()
+	defer func() {
+		if !stop() {
+			<-interrupted
+		}
+		c.nc.SetDeadline(time.Time{})
+	}()
 
 	req.Database = c.database
 	if err := protocol.WriteMessage(c.nc, req); err != nil {
@@ -373,12 +477,8 @@ func (c *conn) roundTrip(ctx context.Context, req *protocol.Request) (*protocol.
 		c.bad = true
 		return nil, c.ioError(ctx, err)
 	}
-	if stop() {
-		// The cancel callback never ran; clear any deadline for reuse.
-		c.nc.SetDeadline(time.Time{})
-	}
 	if resp.Error != "" {
-		return nil, errors.New("lsqlited: server error: " + resp.Error)
+		return nil, &ServerError{Code: resp.Code, Message: resp.Error}
 	}
 	return &resp, nil
 }
@@ -435,14 +535,38 @@ func (c *conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 		return nil, err
 	}
 	resp, err := c.roundTrip(ctx, &protocol.Request{
-		Type:  protocol.TypeQuery,
-		Query: query,
-		Args:  encoded,
+		Type:      protocol.TypeQuery,
+		Query:     query,
+		Args:      encoded,
+		TimeoutMS: c.timeoutMS(ctx),
+		MaxRows:   c.maxRows,
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &rows{columns: resp.Columns, data: resp.Rows}, nil
+	return &rows{columns: resp.Columns, columnTypes: resp.ColumnTypes, data: resp.Rows}, nil
+}
+
+// timeoutMS is the server-side time limit to ask for. A deadline on the
+// context wins, since the caller has already said how long it is willing to
+// wait; the remaining time is rounded up so that a sub-millisecond remainder
+// does not turn into "no limit".
+func (c *conn) timeoutMS(ctx context.Context) int64 {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return int64(c.queryTimeout / time.Millisecond)
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return 1
+	}
+	ms := (int64(remaining) + int64(time.Millisecond) - 1) / int64(time.Millisecond)
+	if ms > math.MaxInt64/int64(time.Millisecond) {
+		// A deadline centuries out is the same as none at all, and this
+		// keeps the server from overflowing when it converts the value.
+		return 0
+	}
+	return ms
 }
 
 func (c *conn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
@@ -451,9 +575,10 @@ func (c *conn) ExecContext(ctx context.Context, query string, args []driver.Name
 		return nil, err
 	}
 	resp, err := c.roundTrip(ctx, &protocol.Request{
-		Type:  protocol.TypeExec,
-		Query: query,
-		Args:  encoded,
+		Type:      protocol.TypeExec,
+		Query:     query,
+		Args:      encoded,
+		TimeoutMS: c.timeoutMS(ctx),
 	})
 	if err != nil {
 		return nil, err
@@ -552,15 +677,31 @@ func (t *tx) Rollback() error {
 
 // rows is a fully buffered result set.
 type rows struct {
-	columns []string
-	data    [][]protocol.Value
-	idx     int
+	columns     []string
+	columnTypes []string
+	data        [][]protocol.Value
+	idx         int
 }
 
-var _ driver.Rows = (*rows)(nil)
+var (
+	_ driver.Rows                           = (*rows)(nil)
+	_ driver.RowsColumnTypeDatabaseTypeName = (*rows)(nil)
+)
 
 func (r *rows) Columns() []string { return r.columns }
 func (r *rows) Close() error      { return nil }
+
+// ColumnTypeDatabaseTypeName returns the declared SQLite type of a column,
+// such as INTEGER or TEXT. It is empty for a column without one — an
+// expression, a literal or an aggregate — and for every column when the
+// server is older than the field, which is why the slice is bounds-checked
+// rather than indexed directly.
+func (r *rows) ColumnTypeDatabaseTypeName(i int) string {
+	if i < 0 || i >= len(r.columnTypes) {
+		return ""
+	}
+	return r.columnTypes[i]
+}
 
 func (r *rows) Next(dest []driver.Value) error {
 	if r.idx >= len(r.data) {

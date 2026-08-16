@@ -32,6 +32,21 @@ const (
 	TypeAuth = "auth"
 )
 
+// Error codes classifying Response.Error. They let a client act on the reason
+// a request failed without matching on the message, which stays free-form so
+// that SQLite's own wording reaches the user unchanged.
+const (
+	// CodeTimeout means the statement was interrupted because it exceeded
+	// the effective time limit.
+	CodeTimeout = "timeout"
+	// CodeTooManyRows means the result carried more rows than the effective
+	// row limit allows. No rows are returned with it.
+	CodeTooManyRows = "too_many_rows"
+	// CodeResponseTooLarge means the encoded result outgrew the effective
+	// response size limit.
+	CodeResponseTooLarge = "response_too_large"
+)
+
 // Request is a message sent from the driver to the server.
 type Request struct {
 	// Type is one of the Type* constants.
@@ -49,6 +64,16 @@ type Request struct {
 	// Proof is the base64-encoded client proof for TypeAuth requests. It
 	// demonstrates knowledge of the password without revealing it.
 	Proof string `json:"proof,omitempty"`
+	// TimeoutMS bounds server-side execution of this request, in
+	// milliseconds. Zero means the client imposes no limit. Applies to
+	// TypeQuery and TypeExec. The server enforces the smaller of this and
+	// its own configured limit, so asking for more than the server allows
+	// does not raise the bound.
+	TimeoutMS int64 `json:"timeout_ms,omitempty"`
+	// MaxRows caps the number of rows a TypeQuery result may carry. Zero
+	// means the client imposes no limit. As with TimeoutMS, the server's
+	// own limit still applies.
+	MaxRows int64 `json:"max_rows,omitempty"`
 }
 
 // AuthChallenge is the server's answer to a TypeAuthInit request. It tells
@@ -65,10 +90,21 @@ type AuthChallenge struct {
 
 // Response is a message sent from the server to the driver.
 type Response struct {
-	// Error is a non-empty string if the request failed.
+	// Error is a non-empty string if the request failed. It carries the
+	// underlying message verbatim, with no prefix, so that a client can show
+	// SQLite's own wording ("no such column: foo") to its users.
 	Error string `json:"error,omitempty"`
+	// Code classifies Error for clients that need to act on the reason. It
+	// is empty for errors that carry no classification.
+	Code string `json:"code,omitempty"`
 	// Columns holds the result column names for TypeQuery requests.
 	Columns []string `json:"columns,omitempty"`
+	// ColumnTypes holds the declared SQLite type of each column, parallel to
+	// Columns. An element is empty when the column has no declared type,
+	// which is the case for expressions, literals and aggregates. It is sent
+	// for every TypeQuery response, including those with no rows, since the
+	// types cannot be recovered from the values themselves.
+	ColumnTypes []string `json:"column_types,omitempty"`
 	// Rows holds the full result set for TypeQuery requests.
 	Rows [][]Value `json:"rows,omitempty"`
 	// LastInsertID and RowsAffected are set for TypeExec requests.

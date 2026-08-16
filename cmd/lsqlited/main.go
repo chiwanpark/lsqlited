@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -17,6 +18,15 @@ import (
 	"github.com/chiwanpark/lsqlited/internal/version"
 	"github.com/chiwanpark/lsqlited/server"
 )
+
+// limitValue renders a configured bound for the startup log, naming the
+// unset case rather than printing a bare zero.
+func limitValue(value string, unset bool) string {
+	if unset {
+		return "unlimited"
+	}
+	return value
+}
 
 func main() {
 	configPath := flag.String("config", "lsqlited.yaml", "path to the YAML configuration file")
@@ -67,11 +77,15 @@ func main() {
 		logger.Error("failed to start server", "error", err)
 		os.Exit(1)
 	}
+	// The limits are worth stating: a daemon that runs statements unbounded
+	// looks exactly like one that bounds them until a query hangs.
 	logger.Info("lsqlited started",
 		"addr", srv.Addr(),
 		"databases", len(cfg.Databases),
 		"tls", srv.TLSEnabled(),
-		"auth", len(cfg.Auth.Users) > 0)
+		"auth", len(cfg.Auth.Users) > 0,
+		"query_timeout", limitValue(strconv.FormatInt(cfg.QueryTimeout, 10)+"s", cfg.QueryTimeout == 0),
+		"max_rows", limitValue(strconv.FormatInt(cfg.MaxRows, 10), cfg.MaxRows == 0))
 	if !srv.TLSEnabled() {
 		logger.Warn("TLS is disabled, queries and results travel in cleartext")
 	}

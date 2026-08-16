@@ -6,6 +6,23 @@ listen:
   # TCP port to listen on.
   port: 7890
 
+# Limits on a single statement, applied to every database below. They are the
+# daemon's own safety net: a client may ask for a tighter bound, but never for
+# a looser one. Set them on an individual database to override these.
+#
+# Upper bound on how long one statement may run, in seconds. Omit for no
+# limit. The statement is interrupted when the time is up, and the client is
+# told why.
+query_timeout: 60
+# Upper bound on the rows one query result may carry. Omit for no limit. The
+# daemon stops scanning at the first row past the limit instead of building
+# the whole result and rejecting it afterwards.
+max_rows: 5000
+# Upper bound on an encoded response body, in bytes (default and maximum:
+# 67108864, the frame limit of the protocol). Checked while the result is
+# built, so the memory is never spent on a result that will be refused.
+max_response_bytes: 67108864
+
 # Transport security. Omit the whole section to serve plaintext TCP, in which
 # case queries and results are readable by anyone on the path. Clients opt in
 # with the ssl_* DSN parameters:
@@ -90,6 +107,10 @@ databases:
     path: /var/lib/lsqlited/metrics.sqlite3
     # SQLite busy timeout in milliseconds (default: 5000).
     params: _busy_timeout=10000
+    # Limits for this database only, overriding the ones above. Reports are
+    # allowed to run longer, but not to return more.
+    query_timeout: 300
+    max_rows: 1000
   archive:
     path: /var/lib/lsqlited/archive.sqlite3
     # Extra SQLite DSN parameters appended to the file: URI used to open this
