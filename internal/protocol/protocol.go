@@ -9,6 +9,7 @@ package protocol
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 )
@@ -16,7 +17,13 @@ import (
 // MaxMessageSize is the maximum allowed size of a single frame body.
 const MaxMessageSize = 64 << 20 // 64 MiB
 
-// Request types.
+// ErrMessageTooLarge reports a body that does not fit in a frame. WriteMessage
+// returns it before writing anything, so the caller may answer with something
+// smaller on the same connection.
+var ErrMessageTooLarge = errors.New("protocol: message too large")
+
+// Request types. TypeAuthInit starts the challenge-response handshake and
+// TypeAuth completes it with the client proof.
 const (
 	TypePing     = "ping"
 	TypeQuery    = "query"
@@ -24,107 +31,70 @@ const (
 	TypeBegin    = "begin"
 	TypeCommit   = "commit"
 	TypeRollback = "rollback"
-	// TypeAuthInit starts the challenge-response handshake: the client
-	// announces the user name and its nonce, the server answers with an
-	// AuthChallenge.
 	TypeAuthInit = "auth_init"
-	// TypeAuth carries the client proof and completes the handshake.
-	TypeAuth = "auth"
+	TypeAuth     = "auth"
 )
 
 // Error codes classifying Response.Error. They let a client act on the reason
 // a request failed without matching on the message, which stays free-form so
 // that SQLite's own wording reaches the user unchanged.
 const (
-	// CodeTimeout means the statement was interrupted because it exceeded
-	// the effective time limit.
-	CodeTimeout = "timeout"
-	// CodeTooManyRows means the result carried more rows than the effective
-	// row limit allows. No rows are returned with it.
-	CodeTooManyRows = "too_many_rows"
-	// CodeResponseTooLarge means the encoded result outgrew the effective
-	// response size limit.
+	CodeTimeout          = "timeout"
+	CodeTooManyRows      = "too_many_rows"
 	CodeResponseTooLarge = "response_too_large"
-	// CodeBusy means another connection held the lock the statement needed
-	// for longer than SQLite was willing to wait. Nothing is wrong with the
-	// statement itself; running it again later is the remedy.
-	CodeBusy = "busy"
+	CodeBusy             = "busy"
 )
 
 // Request is a message sent from the driver to the server.
 type Request struct {
-	// Type is one of the Type* constants.
-	Type string `json:"type"`
-	// Database is the logical database name configured on the server.
-	Database string `json:"database,omitempty"`
-	// Query is the SQL statement for TypeQuery and TypeExec requests.
-	Query string `json:"query,omitempty"`
-	// Args are the positional bind parameters for Query.
-	Args []Value `json:"args,omitempty"`
-	// User is the account name for TypeAuthInit requests.
-	User string `json:"user,omitempty"`
-	// Nonce is the base64-encoded client nonce for TypeAuthInit requests.
+	Type     string  `json:"type"`
+	Database string  `json:"database,omitempty"`
+	Query    string  `json:"query,omitempty"`
+	Args     []Value `json:"args,omitempty"`
+	// User and Nonce identify the client in a TypeAuthInit request; Proof
+	// answers the challenge in a TypeAuth request. All are base64.
+	User  string `json:"user,omitempty"`
 	Nonce string `json:"nonce,omitempty"`
-	// Proof is the base64-encoded client proof for TypeAuth requests. It
-	// demonstrates knowledge of the password without revealing it.
 	Proof string `json:"proof,omitempty"`
-	// TimeoutMS bounds server-side execution of this request, in
-	// milliseconds. Zero means the client imposes no limit. Applies to
-	// TypeQuery and TypeExec. The server enforces the smaller of this and
-	// its own configured limit, so asking for more than the server allows
-	// does not raise the bound.
+	// TimeoutMS and MaxRows are what the client asks for; the server enforces
+	// the smaller of each and its own limit, so asking for more than the
+	// server allows does not raise the bound. Zero asks for no limit.
 	TimeoutMS int64 `json:"timeout_ms,omitempty"`
-	// MaxRows caps the number of rows a TypeQuery result may carry. Zero
-	// means the client imposes no limit. As with TimeoutMS, the server's
-	// own limit still applies.
-	MaxRows int64 `json:"max_rows,omitempty"`
-	// ReadOnly marks a TypeBegin request as a transaction that will not
-	// write. Such a transaction runs deferred, alongside other readers, and
-	// the server rejects any write it attempts after all. A transaction
-	// without the flag takes SQLite's write lock when it begins.
+	MaxRows   int64 `json:"max_rows,omitempty"`
+	// ReadOnly asks TypeBegin for a deferred transaction that runs alongside
+	// other readers and may not write, rather than one that takes the write
+	// lock as it begins.
 	ReadOnly bool `json:"read_only,omitempty"`
 }
 
-// AuthChallenge is the server's answer to a TypeAuthInit request. It tells
-// the client how to derive the salted password and which nonce to bind the
-// proof to.
+// AuthChallenge is the server's answer to a TypeAuthInit request: how to
+// derive the salted password, and the nonce to bind the proof to.
 type AuthChallenge struct {
-	// Salt is the base64-encoded per-user salt.
-	Salt string `json:"salt"`
-	// Iterations is the PBKDF2 iteration count.
-	Iterations int `json:"iterations"`
-	// Nonce is the base64-encoded server nonce.
-	Nonce string `json:"nonce"`
+	Salt       string `json:"salt"`
+	Iterations int    `json:"iterations"`
+	Nonce      string `json:"nonce"`
 }
 
 // Response is a message sent from the server to the driver.
 type Response struct {
-	// Error is a non-empty string if the request failed. It carries the
-	// underlying message verbatim, with no prefix, so that a client can show
-	// SQLite's own wording ("no such column: foo") to its users.
+	// Error carries the underlying message verbatim, with no prefix, so that
+	// a client can show SQLite's own wording. Code classifies it, and is
+	// empty for failures that carry no classification.
 	Error string `json:"error,omitempty"`
-	// Code classifies Error for clients that need to act on the reason. It
-	// is empty for errors that carry no classification.
-	Code string `json:"code,omitempty"`
-	// Columns holds the result column names for TypeQuery requests.
-	Columns []string `json:"columns,omitempty"`
-	// ColumnTypes holds the declared SQLite type of each column, parallel to
-	// Columns. An element is empty when the column has no declared type,
-	// which is the case for expressions, literals and aggregates. It is sent
-	// for every TypeQuery response, including those with no rows, since the
-	// types cannot be recovered from the values themselves.
-	ColumnTypes []string `json:"column_types,omitempty"`
-	// Rows holds the full result set for TypeQuery requests.
-	Rows [][]Value `json:"rows,omitempty"`
-	// LastInsertID and RowsAffected are set for TypeExec requests.
-	LastInsertID int64 `json:"last_insert_id,omitempty"`
-	RowsAffected int64 `json:"rows_affected,omitempty"`
-	// Auth is the challenge returned for TypeAuthInit requests.
-	Auth *AuthChallenge `json:"auth,omitempty"`
-	// Signature is the base64-encoded server signature returned for a
-	// successful TypeAuth request, allowing the client to authenticate the
-	// server in turn.
-	Signature string `json:"signature,omitempty"`
+	Code  string `json:"code,omitempty"`
+	// ColumnTypes is parallel to Columns and holds each column's declared
+	// SQLite type, empty for an expression, a literal or an aggregate. It is
+	// sent even for a result with no rows, since the types cannot be
+	// recovered from the values.
+	Columns      []string  `json:"columns,omitempty"`
+	ColumnTypes  []string  `json:"column_types,omitempty"`
+	Rows         [][]Value `json:"rows,omitempty"`
+	LastInsertID int64     `json:"last_insert_id,omitempty"`
+	RowsAffected int64     `json:"rows_affected,omitempty"`
+	// Auth answers TypeAuthInit; Signature answers a successful TypeAuth and
+	// lets the client authenticate the server in turn.
+	Auth      *AuthChallenge `json:"auth,omitempty"`
+	Signature string         `json:"signature,omitempty"`
 }
 
 // WriteMessage marshals msg as JSON and writes it as a length-prefixed frame.
@@ -134,7 +104,7 @@ func WriteMessage(w io.Writer, msg any) error {
 		return fmt.Errorf("protocol: marshal message: %w", err)
 	}
 	if len(body) > MaxMessageSize {
-		return fmt.Errorf("protocol: message too large (%d bytes, max %d)", len(body), MaxMessageSize)
+		return fmt.Errorf("%w (%d bytes, max %d)", ErrMessageTooLarge, len(body), MaxMessageSize)
 	}
 	frame := make([]byte, 4+len(body))
 	binary.BigEndian.PutUint32(frame[:4], uint32(len(body)))
@@ -153,7 +123,7 @@ func ReadMessage(r io.Reader, msg any) error {
 	}
 	size := binary.BigEndian.Uint32(header[:])
 	if size > MaxMessageSize {
-		return fmt.Errorf("protocol: message too large (%d bytes, max %d)", size, MaxMessageSize)
+		return fmt.Errorf("%w (%d bytes, max %d)", ErrMessageTooLarge, size, MaxMessageSize)
 	}
 	body := make([]byte, size)
 	if _, err := io.ReadFull(r, body); err != nil {

@@ -6,60 +6,35 @@ import (
 )
 
 func TestSQLiteDSN(t *testing.T) {
+	const path = "/tmp/app.sqlite3"
 	cases := []struct {
 		name   string
-		cfg    DatabaseConfig
-		global Params
+		params Params
 		want   string
 	}{
 		{
 			name: "defaults",
-			cfg:  DatabaseConfig{Path: "/tmp/app.sqlite3"},
 			want: "file:/tmp/app.sqlite3?_busy_timeout=5000",
 		},
 		{
-			name: "busy timeout override",
-			cfg: DatabaseConfig{
-				Path:   "/tmp/app.sqlite3",
-				Params: Params{"_busy_timeout": "1000"},
-			},
-			want: "file:/tmp/app.sqlite3?_busy_timeout=1000",
+			name:   "busy timeout override",
+			params: Params{"_busy_timeout": "1000"},
+			want:   "file:/tmp/app.sqlite3?_busy_timeout=1000",
 		},
 		{
-			name: "database params",
-			cfg: DatabaseConfig{
-				Path:   "/tmp/app.sqlite3",
-				Params: Params{"mode": "ro", "immutable": "true"},
-			},
-			want: "file:/tmp/app.sqlite3?_busy_timeout=5000&immutable=true&mode=ro",
+			name:   "configured params",
+			params: Params{"mode": "ro", "immutable": "true"},
+			want:   "file:/tmp/app.sqlite3?_busy_timeout=5000&immutable=true&mode=ro",
 		},
 		{
-			name:   "global params",
-			cfg:    DatabaseConfig{Path: "/tmp/app.sqlite3"},
-			global: Params{"_journal_mode": "WAL", "_busy_timeout": "9000"},
-			want:   "file:/tmp/app.sqlite3?_busy_timeout=9000&_journal_mode=WAL",
-		},
-		{
-			name: "database params override global params",
-			cfg: DatabaseConfig{
-				Path:   "/tmp/app.sqlite3",
-				Params: Params{"mode": "ro"},
-			},
-			global: Params{"mode": "rwc", "cache": "shared"},
-			want:   "file:/tmp/app.sqlite3?_busy_timeout=5000&cache=shared&mode=ro",
-		},
-		{
-			name: "params are escaped",
-			cfg: DatabaseConfig{
-				Path:   "/tmp/app.sqlite3",
-				Params: Params{"_auth_pass": "p@ss word"},
-			},
-			want: "file:/tmp/app.sqlite3?_auth_pass=p%40ss+word&_busy_timeout=5000",
+			name:   "params are escaped",
+			params: Params{"_auth_pass": "p@ss word"},
+			want:   "file:/tmp/app.sqlite3?_auth_pass=p%40ss+word&_busy_timeout=5000",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := sqliteDSN(tc.cfg, tc.global); got != tc.want {
+			if got := sqliteDSN(path, tc.params); got != tc.want {
 				t.Errorf("sqliteDSN() = %q, want %q", got, tc.want)
 			}
 		})
@@ -69,7 +44,7 @@ func TestSQLiteDSN(t *testing.T) {
 func TestOpenSQLiteWithParams(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app.sqlite3")
 
-	rw, err := openSQLite(DatabaseConfig{Path: path}, nil, nil)
+	rw, err := openSQLite(path, &Config{})
 	if err != nil {
 		t.Fatalf("open read-write: %v", err)
 	}
@@ -80,10 +55,9 @@ func TestOpenSQLiteWithParams(t *testing.T) {
 		t.Fatalf("close read-write: %v", err)
 	}
 
-	immutable, err := openSQLite(DatabaseConfig{
-		Path:   path,
-		Params: Params{"immutable": "true"},
-	}, Params{"mode": "ro"}, nil)
+	immutable, err := openSQLite(path, &Config{
+		Params: Params{"mode": "ro", "immutable": "true"},
+	})
 	if err != nil {
 		t.Fatalf("open immutable: %v", err)
 	}

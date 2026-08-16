@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -131,8 +132,8 @@ func TestReadMessageTooLarge(t *testing.T) {
 	binary.BigEndian.PutUint32(header[:], MaxMessageSize+1)
 	buf.Write(header[:])
 	var msg Request
-	if err := ReadMessage(&buf, &msg); err == nil {
-		t.Fatal("expected error for oversized message")
+	if err := ReadMessage(&buf, &msg); !errors.Is(err, ErrMessageTooLarge) {
+		t.Fatalf("ReadMessage: error = %v, want ErrMessageTooLarge", err)
 	}
 }
 

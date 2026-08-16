@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -19,41 +18,18 @@ const forever = `WITH RECURSIVE spin(x) AS (
 	SELECT 1 UNION ALL SELECT x + 1 FROM spin
 ) SELECT count(*) FROM spin`
 
-// startLimitedServer starts a server serving the "test" database under the
-// given server-wide limits, and returns its address.
+// startLimitedServer serves the default databases under the given
+// server-wide limits.
 func startLimitedServer(t *testing.T, limits server.Limits) string {
 	t.Helper()
-	cfg := &server.Config{
-		Listen: server.ListenConfig{Host: "127.0.0.1", Port: 0},
-		Limits: limits,
-		Databases: map[string]server.DatabaseConfig{
-			"test": {Path: filepath.Join(t.TempDir(), "test.sqlite3")},
-		},
-	}
-	srv := server.New(cfg)
-	if err := srv.Start(); err != nil {
-		t.Fatalf("start server: %v", err)
-	}
-	t.Cleanup(func() { srv.Close() })
-	return srv.Addr().String()
+	return serve(t, &server.Config{Limits: limits})
 }
 
-// startLimitedServerWithParams starts a server whose "test" database is
-// opened with the given SQLite parameters.
-func startLimitedServerWithParams(t *testing.T, params map[string]string) string {
+// startLimitedServerWithParams opens the database with the given SQLite
+// parameters.
+func startLimitedServerWithParams(t *testing.T, params server.Params) string {
 	t.Helper()
-	cfg := &server.Config{
-		Listen: server.ListenConfig{Host: "127.0.0.1", Port: 0},
-		Databases: map[string]server.DatabaseConfig{
-			"test": {Path: filepath.Join(t.TempDir(), "test.sqlite3"), Params: params},
-		},
-	}
-	srv := server.New(cfg)
-	if err := srv.Start(); err != nil {
-		t.Fatalf("start server: %v", err)
-	}
-	t.Cleanup(func() { srv.Close() })
-	return srv.Addr().String()
+	return serve(t, &server.Config{Params: params})
 }
 
 // series returns a query producing the numbers 1..n, one per row.
@@ -185,23 +161,6 @@ func TestMaxRowsFromServerConfig(t *testing.T) {
 	loose := openDSN(t, fmt.Sprintf("lsqlited://%s/test?max_rows=1000", addr))
 	if _, err := loose.Query(series(6)); !errors.Is(err, lsqlited.ErrTooManyRows) {
 		t.Fatalf("query past the limit: error = %v, want ErrTooManyRows", err)
-	}
-}
-
-func TestMaxResponseBytes(t *testing.T) {
-	addr := startLimitedServer(t, server.Limits{MaxResponseBytes: 4096})
-	db := openDB(t, addr, "test")
-
-	small := series(3)
-	if _, err := db.Query(small); err != nil {
-		t.Fatalf("small query: %v", err)
-	}
-
-	big := `WITH RECURSIVE seq(n) AS (
-		SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 100
-	) SELECT hex(randomblob(512)) FROM seq`
-	if _, err := db.Query(big); !errors.Is(err, lsqlited.ErrResponseTooLarge) {
-		t.Fatalf("big query: error = %v, want ErrResponseTooLarge", err)
 	}
 }
 

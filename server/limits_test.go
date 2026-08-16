@@ -2,9 +2,10 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"net"
-	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,65 +19,28 @@ const forever = `WITH RECURSIVE spin(x) AS (
 ) SELECT count(*) FROM spin`
 
 func TestLimitsResolve(t *testing.T) {
-	const mib = 1 << 20
 	cases := []struct {
-		name     string
-		server   Limits
-		database Limits
-		want     statementLimits
+		name   string
+		limits Limits
+		want   statementLimits
 	}{
 		{
 			name: "nothing configured",
-			want: statementLimits{maxResponseBytes: DefaultMaxResponseBytes},
+			want: statementLimits{},
 		},
 		{
-			name:   "server only",
-			server: Limits{QueryTimeout: 60, MaxRows: 5000},
+			name:   "seconds become durations",
+			limits: Limits{QueryTimeout: 60, TransactionTimeout: 30, MaxRows: 5000},
 			want: statementLimits{
-				timeout:          time.Minute,
-				maxRows:          5000,
-				maxResponseBytes: DefaultMaxResponseBytes,
+				timeout:            time.Minute,
+				transactionTimeout: 30 * time.Second,
+				maxRows:            5000,
 			},
-		},
-		{
-			name:     "database only",
-			database: Limits{QueryTimeout: 1, MaxRows: 10, MaxResponseBytes: mib},
-			want: statementLimits{
-				timeout:          time.Second,
-				maxRows:          10,
-				maxResponseBytes: mib,
-			},
-		},
-		{
-			name:     "the tighter bound wins",
-			server:   Limits{QueryTimeout: 60, MaxRows: 5000},
-			database: Limits{QueryTimeout: 1, MaxRows: 10},
-			want: statementLimits{
-				timeout:          time.Second,
-				maxRows:          10,
-				maxResponseBytes: DefaultMaxResponseBytes,
-			},
-		},
-		{
-			name:     "a looser database bound does not raise the server's",
-			server:   Limits{QueryTimeout: 1, MaxRows: 10},
-			database: Limits{QueryTimeout: 3600, MaxRows: 1_000_000},
-			want: statementLimits{
-				timeout:          time.Second,
-				maxRows:          10,
-				maxResponseBytes: DefaultMaxResponseBytes,
-			},
-		},
-		{
-			name:     "response size is overridden, not minimized",
-			server:   Limits{MaxResponseBytes: mib},
-			database: Limits{MaxResponseBytes: 4 * mib},
-			want:     statementLimits{maxResponseBytes: 4 * mib},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.server.resolve(tc.database); got != tc.want {
+			if got := tc.limits.resolve(); got != tc.want {
 				t.Errorf("resolve() = %+v, want %+v", got, tc.want)
 			}
 		})
@@ -85,12 +49,8 @@ func TestLimitsResolve(t *testing.T) {
 
 func TestServerLimitsFromRequest(t *testing.T) {
 	srv := New(&Config{
-		Limits: Limits{QueryTimeout: 60, MaxRows: 5000},
-		Databases: map[string]DatabaseConfig{
-			"app": {Path: "/tmp/app.sqlite3"},
-			"strict": {Path: "/tmp/strict.sqlite3",
-				Limits: Limits{QueryTimeout: 2, MaxRows: 10}},
-		},
+		Limits:    Limits{QueryTimeout: 60, MaxRows: 5000},
+		Databases: map[string]string{"app": "/tmp/app.sqlite3"},
 	})
 
 	cases := []struct {
@@ -120,20 +80,8 @@ func TestServerLimitsFromRequest(t *testing.T) {
 			wantRows:    5000,
 		},
 		{
-			name:        "the database's own limits apply",
-			req:         protocol.Request{Database: "strict", TimeoutMS: 600_000, MaxRows: 1_000_000},
-			wantTimeout: 2 * time.Second,
-			wantRows:    10,
-		},
-		{
 			name:        "negative values are ignored",
 			req:         protocol.Request{Database: "app", TimeoutMS: -1, MaxRows: -1},
-			wantTimeout: time.Minute,
-			wantRows:    5000,
-		},
-		{
-			name:        "an unknown database falls back to the server's limits",
-			req:         protocol.Request{Database: "nope"},
 			wantTimeout: time.Minute,
 			wantRows:    5000,
 		},
@@ -147,10 +95,37 @@ func TestServerLimitsFromRequest(t *testing.T) {
 			if got.maxRows != tc.wantRows {
 				t.Errorf("maxRows = %d, want %d", got.maxRows, tc.wantRows)
 			}
-			if got.maxResponseBytes != DefaultMaxResponseBytes {
-				t.Errorf("maxResponseBytes = %d, want %d", got.maxResponseBytes, int64(DefaultMaxResponseBytes))
-			}
 		})
+	}
+}
+
+// TestWriteResponseTooLarge checks that a result which does not fit in a
+// protocol frame reaches the client as a classified error rather than as a
+// dropped connection.
+func TestWriteResponseTooLarge(t *testing.T) {
+	if testing.Short() {
+		t.Skip("allocates more than 64 MiB")
+	}
+	oversized := &protocol.Response{
+		Columns: []string{"blob"},
+		Rows: [][]protocol.Value{{{
+			T: protocol.TypeTagText,
+			V: strings.Repeat("x", protocol.MaxMessageSize),
+		}}},
+	}
+	var buf bytes.Buffer
+	if err := writeResponse(&buf, oversized); err != nil {
+		t.Fatalf("writeResponse: %v", err)
+	}
+	var got protocol.Response
+	if err := protocol.ReadMessage(&buf, &got); err != nil {
+		t.Fatalf("ReadMessage: %v", err)
+	}
+	if got.Code != protocol.CodeResponseTooLarge {
+		t.Errorf("code = %q, want %q", got.Code, protocol.CodeResponseTooLarge)
+	}
+	if len(got.Rows) != 0 {
+		t.Errorf("rows = %d, want none", len(got.Rows))
 	}
 }
 
@@ -234,16 +209,9 @@ func TestPeerWatchLeavesConnectionUsable(t *testing.T) {
 }
 
 // TestDisconnectInterruptsStatement checks that a client that hangs up while
-// its statement runs takes the statement down with it. The proof is that the
-// server shuts down: Close waits for handlers, and a handler abandoned inside
-// a statement that never ends would never return.
+// its statement runs takes the statement down with it.
 func TestDisconnectInterruptsStatement(t *testing.T) {
-	srv, addr := startTestServer(t, &Config{
-		Listen: ListenConfig{Host: "127.0.0.1", Port: 0},
-		Databases: map[string]DatabaseConfig{
-			"test": {Path: filepath.Join(t.TempDir(), "test.sqlite3")},
-		},
-	})
+	srv, addr := startTestServer(t, &Config{})
 
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -272,13 +240,7 @@ func TestDisconnectInterruptsStatement(t *testing.T) {
 // TestStatementTimeoutInterrupts checks the same for a statement that runs
 // out of time: the answer arrives, and it is classified.
 func TestStatementTimeoutInterrupts(t *testing.T) {
-	_, addr := startTestServer(t, &Config{
-		Listen: ListenConfig{Host: "127.0.0.1", Port: 0},
-		Limits: Limits{QueryTimeout: 1},
-		Databases: map[string]DatabaseConfig{
-			"test": {Path: filepath.Join(t.TempDir(), "test.sqlite3")},
-		},
-	})
+	_, addr := startTestServer(t, &Config{Limits: Limits{QueryTimeout: 1}})
 
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -313,16 +275,4 @@ func TestStatementTimeoutInterrupts(t *testing.T) {
 	if pong.Error != "" {
 		t.Errorf("ping error = %q, want none", pong.Error)
 	}
-}
-
-// startTestServer starts a server on an ephemeral port and returns it with
-// its address. Closing it twice is harmless, so tests may close it early.
-func startTestServer(t *testing.T, cfg *Config) (*Server, string) {
-	t.Helper()
-	srv := New(cfg)
-	if err := srv.Start(); err != nil {
-		t.Fatalf("start server: %v", err)
-	}
-	t.Cleanup(func() { srv.Close() })
-	return srv, srv.Addr().String()
 }

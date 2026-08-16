@@ -3,7 +3,6 @@ package server
 import (
 	"io"
 	"net"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -51,12 +50,7 @@ func (c *rawClient) exec(query string) *protocol.Response {
 // TestAbandonedTransactionReleasesLock checks that a client which vanishes
 // mid-transaction does not take the write lock with it.
 func TestAbandonedTransactionReleasesLock(t *testing.T) {
-	_, addr := startTestServer(t, &Config{
-		Listen: ListenConfig{Host: "127.0.0.1", Port: 0},
-		Databases: map[string]DatabaseConfig{
-			"test": {Path: filepath.Join(t.TempDir(), "test.sqlite3")},
-		},
-	})
+	_, addr := startTestServer(t, &Config{})
 
 	owner := dialRaw(t, addr)
 	owner.exec("CREATE TABLE t (n INTEGER)")
@@ -85,13 +79,7 @@ func TestAbandonedTransactionReleasesLock(t *testing.T) {
 // TestIdleTransactionTimeout checks that a transaction nobody comes back to
 // is rolled back, instead of holding the write lock for good.
 func TestIdleTransactionTimeout(t *testing.T) {
-	_, addr := startTestServer(t, &Config{
-		Listen: ListenConfig{Host: "127.0.0.1", Port: 0},
-		Limits: Limits{TransactionTimeout: 1},
-		Databases: map[string]DatabaseConfig{
-			"test": {Path: filepath.Join(t.TempDir(), "test.sqlite3")},
-		},
-	})
+	_, addr := startTestServer(t, &Config{Limits: Limits{TransactionTimeout: 1}})
 
 	owner := dialRaw(t, addr)
 	owner.exec("CREATE TABLE t (n INTEGER)")
@@ -123,13 +111,7 @@ func TestIdleTransactionTimeout(t *testing.T) {
 // touches sessions that are holding something back: a connection that is
 // merely quiet stays usable.
 func TestIdleSessionWithoutTransactionIsKept(t *testing.T) {
-	_, addr := startTestServer(t, &Config{
-		Listen: ListenConfig{Host: "127.0.0.1", Port: 0},
-		Limits: Limits{TransactionTimeout: 1},
-		Databases: map[string]DatabaseConfig{
-			"test": {Path: filepath.Join(t.TempDir(), "test.sqlite3")},
-		},
-	})
+	_, addr := startTestServer(t, &Config{Limits: Limits{TransactionTimeout: 1}})
 
 	client := dialRaw(t, addr)
 	client.exec("CREATE TABLE t (n INTEGER)")
@@ -154,12 +136,7 @@ func TestReadOnlyTransactionsShareTheDatabase(t *testing.T) {
 		{name: "wal", params: Params{"_journal_mode": "WAL"}, writerJoinsIn: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, addr := startTestServer(t, &Config{
-				Listen: ListenConfig{Host: "127.0.0.1", Port: 0},
-				Databases: map[string]DatabaseConfig{
-					"test": {Path: filepath.Join(t.TempDir(), "test.sqlite3"), Params: tc.params},
-				},
-			})
+			_, addr := startTestServer(t, &Config{Params: tc.params})
 
 			owner := dialRaw(t, addr)
 			owner.exec("CREATE TABLE t (n INTEGER)")

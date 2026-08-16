@@ -3,8 +3,6 @@ package lsqlited_test
 import (
 	"context"
 	"database/sql"
-	"fmt"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,41 +10,6 @@ import (
 	_ "github.com/chiwanpark/lsqlited"
 	"github.com/chiwanpark/lsqlited/server"
 )
-
-// startServer starts an lsqlited server on an ephemeral port serving two
-// databases: "test" (read-write) and "testro" (the same file, read-only).
-func startServer(t *testing.T) string {
-	t.Helper()
-	dbPath := filepath.Join(t.TempDir(), "test.sqlite3")
-	cfg := &server.Config{
-		Listen: server.ListenConfig{Host: "127.0.0.1", Port: 0},
-		Databases: map[string]server.DatabaseConfig{
-			"test":   {Path: dbPath},
-			"testro": {Path: dbPath, Params: server.Params{"mode": "ro"}},
-		},
-	}
-	srv := server.New(cfg)
-	if err := srv.Start(); err != nil {
-		t.Fatalf("start server: %v", err)
-	}
-	t.Cleanup(func() { srv.Close() })
-	return srv.Addr().String()
-}
-
-func openDB(t *testing.T, addr, database string) *sql.DB {
-	t.Helper()
-	return openDSN(t, fmt.Sprintf("lsqlited://%s/%s", addr, database))
-}
-
-func openDSN(t *testing.T, dsn string) *sql.DB {
-	t.Helper()
-	db, err := sql.Open("lsqlited", dsn)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
-}
 
 func TestEndToEnd(t *testing.T) {
 	addr := startServer(t)
@@ -202,9 +165,14 @@ func TestPreparedStatement(t *testing.T) {
 	}
 }
 
-func TestReadOnlyDatabase(t *testing.T) {
-	addr := startServer(t)
-	rw := openDB(t, addr, "test")
+// TestReadOnlyServer checks that the configured SQLite parameters reach the
+// file: a daemon that opens its databases with mode=ro serves reads and
+// refuses writes.
+func TestReadOnlyServer(t *testing.T) {
+	path := testPath(t)
+	rw := openDB(t, serve(t, &server.Config{
+		Databases: map[string]string{"test": path},
+	}), "test")
 	if _, err := rw.Exec("CREATE TABLE t (v TEXT)"); err != nil {
 		t.Fatalf("create table: %v", err)
 	}
@@ -212,7 +180,10 @@ func TestReadOnlyDatabase(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 
-	ro := openDB(t, addr, "testro")
+	ro := openDB(t, serve(t, &server.Config{
+		Databases: map[string]string{"test": path},
+		Params:    server.Params{"mode": "ro"},
+	}), "test")
 	var v string
 	if err := ro.QueryRow("SELECT v FROM t").Scan(&v); err != nil {
 		t.Fatalf("read-only select: %v", err)

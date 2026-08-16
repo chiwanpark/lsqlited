@@ -19,8 +19,8 @@ import (
 	"github.com/chiwanpark/lsqlited/server"
 )
 
-// limitValue renders a configured bound for the startup log, naming the
-// unset case rather than printing a bare zero.
+// limitValue renders a configured bound for the startup log, naming the unset
+// case rather than printing a bare zero.
 func limitValue(value string, unset bool) string {
 	if unset {
 		return "unlimited"
@@ -39,15 +39,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		// Asking SQLite rather than reading a variable: clients read the
-		// version with `SELECT lsqlited_version()`, and this prints whatever
-		// that function would answer.
-		v, err := version.Query(context.Background())
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		fmt.Println(v)
+		fmt.Println(version.String())
 		return
 	}
 
@@ -77,8 +69,6 @@ func main() {
 		logger.Error("failed to start server", "error", err)
 		os.Exit(1)
 	}
-	// The limits are worth stating: a daemon that runs statements unbounded
-	// looks exactly like one that bounds them until a query hangs.
 	logger.Info("lsqlited started",
 		"addr", srv.Addr(),
 		"databases", len(cfg.Databases),
@@ -102,15 +92,12 @@ func main() {
 }
 
 // printVerifier reads a password from in and writes its verifier to out, so
-// that the configuration file never has to hold the password itself:
-//
-//	printf '%s' 's3cret' | lsqlited -hash-password
+// that the configuration file never has to hold the password itself.
 func printVerifier(in io.Reader, out io.Writer, iterations int) error {
 	raw, err := io.ReadAll(in)
 	if err != nil {
 		return fmt.Errorf("read password: %w", err)
 	}
-	// Tolerate a trailing newline from an interactive shell or `echo`.
 	password := strings.TrimRight(string(raw), "\r\n")
 	if password == "" {
 		return fmt.Errorf("password must not be empty")

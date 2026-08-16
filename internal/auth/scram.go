@@ -1,28 +1,18 @@
-// Package auth implements the challenge-response authentication used by
-// lsqlited. The scheme follows SCRAM-SHA-256 (RFC 5802) closely enough to
-// inherit its security properties, while using the lsqlited JSON framing
-// instead of the SASL text encoding.
-//
-// The password never travels over the wire. Instead:
+// Package auth implements SCRAM-SHA-256 (RFC 5802) over the lsqlited JSON
+// framing instead of the SASL text encoding. The password never travels over
+// the wire:
 //
 //	saltedPassword = PBKDF2-SHA256(password, salt, iterations)
 //	clientKey      = HMAC-SHA256(saltedPassword, "Client Key")
 //	storedKey      = SHA256(clientKey)
 //	serverKey      = HMAC-SHA256(saltedPassword, "Server Key")
+//	clientProof    = clientKey XOR HMAC-SHA256(storedKey, authMessage)
 //
-// The server persists only salt, iterations, storedKey and serverKey (a
-// Verifier). The client proves knowledge of the password by sending
-//
-//	clientProof = clientKey XOR HMAC-SHA256(storedKey, authMessage)
-//
-// from which the server recovers clientKey and checks SHA256(clientKey)
-// against storedKey. Because the server stores storedKey rather than
-// clientKey, a leaked configuration file does not by itself allow an
-// attacker to authenticate.
-//
-// The server answers with HMAC-SHA256(serverKey, authMessage), which lets
-// the client authenticate the server in turn. Both directions are bound to
-// fresh random nonces, so recorded handshakes cannot be replayed.
+// The server stores only salt, iterations, storedKey and serverKey, so a
+// leaked configuration file does not by itself allow an attacker to
+// authenticate, and answers with HMAC-SHA256(serverKey, authMessage), which
+// authenticates the server in turn. Both directions are bound to fresh random
+// nonces, so recorded handshakes cannot be replayed.
 package auth
 
 import (
@@ -42,26 +32,23 @@ import (
 const Mechanism = "SCRAM-SHA-256"
 
 const (
-	// DefaultIterations is the PBKDF2 iteration count used when deriving a
-	// verifier from a plaintext password. It matches the PostgreSQL default:
-	// clients run the derivation once per new connection, so a much larger
-	// count would make connection setup noticeably slower.
+	// DefaultIterations matches the PostgreSQL default: clients run the
+	// derivation once per new connection, so a much larger count would make
+	// connection setup noticeably slower.
 	DefaultIterations = 4096
-	// MinIterations is the smallest iteration count accepted by both peers.
+	// MinIterations is the smallest count accepted by both peers, and
+	// MaxIterations bounds the work a malicious server can force on a client.
 	MinIterations = 1000
-	// MaxIterations bounds the work a malicious server can force a client to
-	// perform during the handshake.
 	MaxIterations = 1 << 20
 
-	// SaltLen is the length in bytes of a generated salt.
-	SaltLen = 16
-	// MinSaltLen is the smallest salt accepted in an encoded verifier. It is
-	// the floor recommended by RFC 8018, and also what crypto/pbkdf2 demands
-	// under GODEBUG=fips140=only.
+	// SaltLen is the length of a generated salt. MinSaltLen is the floor
+	// recommended by RFC 8018, and what crypto/pbkdf2 demands under
+	// GODEBUG=fips140=only.
+	SaltLen    = 16
 	MinSaltLen = 16
-	// NonceLen is the length in bytes of a generated nonce.
-	NonceLen = 24
-	// MinNonceLen is the smallest nonce accepted from the peer.
+	// NonceLen is the length of a generated nonce; MinNonceLen is the
+	// smallest accepted from the peer.
+	NonceLen    = 24
 	MinNonceLen = 16
 
 	keyLen = sha256.Size
@@ -72,9 +59,9 @@ var (
 	serverKeyLabel = []byte("Server Key")
 )
 
-// Verifier holds everything the server needs to check a client proof. It
-// is password-equivalent only in the sense that it allows offline guessing;
-// it cannot be replayed as a credential.
+// Verifier holds everything the server needs to check a client proof. It is
+// password-equivalent only in that it allows offline guessing; it cannot be
+// replayed as a credential.
 type Verifier struct {
 	Iterations int
 	Salt       []byte
@@ -89,12 +76,11 @@ func NewVerifier(password string, iterations int) (*Verifier, error) {
 	if _, err := rand.Read(salt); err != nil {
 		return nil, fmt.Errorf("auth: generate salt: %w", err)
 	}
-	return DeriveVerifier(password, salt, iterations)
+	return deriveVerifier(password, salt, iterations)
 }
 
-// DeriveVerifier derives a verifier for password with an explicit salt. A
-// non-positive iterations value selects DefaultIterations.
-func DeriveVerifier(password string, salt []byte, iterations int) (*Verifier, error) {
+// deriveVerifier derives a verifier for password with an explicit salt.
+func deriveVerifier(password string, salt []byte, iterations int) (*Verifier, error) {
 	if iterations <= 0 {
 		iterations = DefaultIterations
 	}
@@ -132,11 +118,10 @@ func (v *Verifier) ServerSignature(authMessage string) []byte {
 	return hmacSum(v.ServerKey, []byte(authMessage))
 }
 
-// String encodes the verifier in the PostgreSQL SCRAM verifier format:
+// String encodes the verifier in the PostgreSQL SCRAM format, with the salt
+// and keys in standard base64:
 //
 //	SCRAM-SHA-256$<iterations>:<salt>$<storedKey>:<serverKey>
-//
-// where salt and keys are base64 (standard encoding).
 func (v *Verifier) String() string {
 	return fmt.Sprintf("%s$%d:%s$%s:%s",
 		Mechanism,
@@ -145,12 +130,6 @@ func (v *Verifier) String() string {
 		base64.StdEncoding.EncodeToString(v.StoredKey),
 		base64.StdEncoding.EncodeToString(v.ServerKey),
 	)
-}
-
-// IsVerifier reports whether s looks like an encoded verifier rather than a
-// plaintext password.
-func IsVerifier(s string) bool {
-	return strings.HasPrefix(s, Mechanism+"$")
 }
 
 // ParseVerifier decodes the textual form produced by Verifier.String.
@@ -223,10 +202,9 @@ func DecoyVerifier(secret []byte, user string, iterations int) *Verifier {
 	}
 }
 
-// SaltPassword derives the salted password shared by both peers. It fails
-// only on out-of-range parameters, which both peers reject before getting
-// this far, or when running under GODEBUG=fips140=only with a verifier whose
-// salt is too short.
+// SaltPassword derives the salted password shared by both peers. It fails only
+// on out-of-range parameters, which both peers reject before getting this far,
+// or under GODEBUG=fips140=only with a salt that is too short.
 func SaltPassword(password string, salt []byte, iterations int) ([]byte, error) {
 	salted, err := pbkdf2.Key(sha256.New, password, salt, iterations, keyLen)
 	if err != nil {
@@ -253,10 +231,10 @@ func ServerSignature(saltedPassword []byte, authMessage string) []byte {
 	return hmacSum(hmacSum(saltedPassword, serverKeyLabel), []byte(authMessage))
 }
 
-// AuthMessage builds the string both peers sign. Every parameter that
-// influences the handshake is covered, so a man in the middle cannot swap
-// the salt or downgrade the iteration count without the proof failing. The
-// user name is base64-encoded to keep the separators unambiguous.
+// AuthMessage builds the string both peers sign. It covers every parameter
+// that influences the handshake, so a man in the middle cannot swap the salt
+// or downgrade the iteration count without the proof failing. The user name is
+// base64-encoded to keep the separators unambiguous.
 func AuthMessage(user string, clientNonce, serverNonce, salt []byte, iterations int) string {
 	enc := base64.StdEncoding
 	var b strings.Builder

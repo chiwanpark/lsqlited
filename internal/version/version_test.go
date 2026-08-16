@@ -1,7 +1,6 @@
 package version
 
 import (
-	"context"
 	"regexp"
 	"testing"
 	"time"
@@ -16,56 +15,36 @@ func stamp(t *testing.T, v string) {
 	t.Cleanup(func() { version = old })
 }
 
-// TestQueryReportsStampedVersion checks the whole path a client takes: the
-// string baked in at build time reaches SQL through lsqlited_version().
-func TestQueryReportsStampedVersion(t *testing.T) {
-	stamp(t, "3.2534.7")
-
-	got, err := Query(context.Background())
-	if err != nil {
-		t.Fatalf("Query: %v", err)
+func TestString(t *testing.T) {
+	cases := []struct {
+		name    string
+		stamped string
+		want    string
+	}{
+		{name: "stamped", stamped: "3.2534.7", want: "3.2534.7"},
+		// Guards against a release job passing the version with a stray
+		// newline, e.g. from a $(cat ...) substitution.
+		{name: "surrounding whitespace is trimmed", stamped: "  1.2401.9\n", want: "1.2401.9"},
 	}
-	if want := "3.2534.7"; got != want {
-		t.Errorf("Query() = %q, want %q", got, want)
-	}
-}
-
-// TestQueryTrimsStampedVersion guards against a release job that passes the
-// version with a stray newline, e.g. from a $(cat ...) substitution.
-func TestQueryTrimsStampedVersion(t *testing.T) {
-	stamp(t, "  1.2401.9\n")
-
-	got, err := Query(context.Background())
-	if err != nil {
-		t.Fatalf("Query: %v", err)
-	}
-	if want := "1.2401.9"; got != want {
-		t.Errorf("Query() = %q, want %q", got, want)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stamp(t, tc.stamped)
+			if got := String(); got != tc.want {
+				t.Errorf("String() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
-// TestQueryUnstamped covers a build that was not stamped, such as a local
+// TestStringUnstamped covers a build that was not stamped, such as a local
 // `go build`: it must still answer, and say that it is a development build.
-func TestQueryUnstamped(t *testing.T) {
+func TestStringUnstamped(t *testing.T) {
 	stamp(t, "")
 
-	got, err := Query(context.Background())
-	if err != nil {
-		t.Fatalf("Query: %v", err)
-	}
+	got := String()
 	want := regexp.MustCompile(`^` + regexp.QuoteMeta(devHead) + `\.\d{4}\.0-dev$`)
 	if !want.MatchString(got) {
-		t.Errorf("Query() = %q, want a development HeadVer matching %s", got, want)
-	}
-}
-
-// TestQueryCancelled checks that the context is honoured rather than ignored.
-func TestQueryCancelled(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	if _, err := Query(ctx); err == nil {
-		t.Error("Query() with a cancelled context returned no error")
+		t.Errorf("String() = %q, want a development HeadVer matching %s", got, want)
 	}
 }
 

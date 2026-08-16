@@ -26,7 +26,7 @@ func TestParallelReads(t *testing.T) {
 		t.Skipf("needs at least %d cores to tell parallel from sequential", workers)
 	}
 	path := filepath.Join(t.TempDir(), "test.sqlite3")
-	seed, err := openSQLite(DatabaseConfig{Path: path}, nil, nil)
+	seed, err := openSQLite(path, &Config{})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -35,7 +35,7 @@ func TestParallelReads(t *testing.T) {
 	}
 	seed.Close()
 
-	db, err := openSQLite(DatabaseConfig{Path: path, Params: Params{"mode": "ro"}}, nil, nil)
+	db, err := openSQLite(path, &Config{Params: Params{"mode": "ro"}})
 	if err != nil {
 		t.Fatalf("open read-only: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestParallelReads(t *testing.T) {
 // makes a database look slow under concurrency.
 func TestPoolReusesConnections(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.sqlite3")
-	seed, err := openSQLite(DatabaseConfig{Path: path}, nil, nil)
+	seed, err := openSQLite(path, &Config{})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestPoolReusesConnections(t *testing.T) {
 	seed.Close()
 
 	const workers, each = 8, 200
-	db, err := openSQLite(DatabaseConfig{Path: path, MaxConnections: workers}, nil, nil)
+	db, err := openSQLite(path, &Config{MaxConnections: workers})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestConfigurePool(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "test.sqlite3")
-			db, err := openSQLite(DatabaseConfig{Path: path, MaxConnections: tc.maxConns}, nil, nil)
+			db, err := openSQLite(path, &Config{MaxConnections: tc.maxConns})
 			if err != nil {
 				t.Fatalf("open: %v", err)
 			}

@@ -24,34 +24,25 @@ import (
 // from auth.DefaultIterations.
 const testIterations = auth.MinIterations
 
-// startAuthServer starts a server that serves the "test" database and
-// requires authentication as alice/s3cret (configured with a plaintext
-// password) or bob/hunter2 (configured with a precomputed verifier).
-func startAuthServer(t *testing.T) string {
+// verifierFor builds the credential an account is configured with.
+func verifierFor(t *testing.T, password string) string {
 	t.Helper()
-	verifier, err := auth.NewVerifier("hunter2", testIterations)
+	verifier, err := auth.NewVerifier(password, testIterations)
 	if err != nil {
 		t.Fatalf("new verifier: %v", err)
 	}
-	cfg := &server.Config{
-		Listen: server.ListenConfig{Host: "127.0.0.1", Port: 0},
-		Auth: server.AuthConfig{
-			Iterations: testIterations,
-			Users: map[string]server.UserConfig{
-				"alice": {Password: "s3cret"},
-				"bob":   {Verifier: verifier.String()},
-			},
+	return verifier.String()
+}
+
+// startAuthServer requires authentication as alice/s3cret or bob/hunter2.
+func startAuthServer(t *testing.T) string {
+	t.Helper()
+	return serve(t, &server.Config{Auth: server.AuthConfig{
+		Users: map[string]server.UserConfig{
+			"alice": {Verifier: verifierFor(t, "s3cret")},
+			"bob":   {Verifier: verifierFor(t, "hunter2")},
 		},
-		Databases: map[string]server.DatabaseConfig{
-			"test": {Path: filepath.Join(t.TempDir(), "test.sqlite3")},
-		},
-	}
-	srv := server.New(cfg)
-	if err := srv.Start(); err != nil {
-		t.Fatalf("start server: %v", err)
-	}
-	t.Cleanup(func() { srv.Close() })
-	return srv.Addr().String()
+	}})
 }
 
 func authDSN(addr, user, password string) string {
@@ -69,28 +60,21 @@ func authDatabaseDSN(addr, user, password, database string) string {
 func startGrantServer(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	cfg := &server.Config{
-		Listen: server.ListenConfig{Host: "127.0.0.1", Port: 0},
+	secret := verifierFor(t, "s3cret")
+	return serve(t, &server.Config{
 		Auth: server.AuthConfig{
-			Iterations: testIterations,
 			Users: map[string]server.UserConfig{
-				"root":      {Password: "s3cret"},
-				"alice":     {Password: "s3cret", Databases: []string{"app", "metrics"}},
-				"suspended": {Password: "s3cret", Databases: []string{}},
+				"root":      {Verifier: secret},
+				"alice":     {Verifier: secret, Databases: []string{"app", "metrics"}},
+				"suspended": {Verifier: secret, Databases: []string{}},
 			},
 		},
-		Databases: map[string]server.DatabaseConfig{
-			"app":     {Path: filepath.Join(dir, "app.sqlite3")},
-			"metrics": {Path: filepath.Join(dir, "metrics.sqlite3")},
-			"archive": {Path: filepath.Join(dir, "archive.sqlite3")},
+		Databases: map[string]string{
+			"app":     filepath.Join(dir, "app.sqlite3"),
+			"metrics": filepath.Join(dir, "metrics.sqlite3"),
+			"archive": filepath.Join(dir, "archive.sqlite3"),
 		},
-	}
-	srv := server.New(cfg)
-	if err := srv.Start(); err != nil {
-		t.Fatalf("start server: %v", err)
-	}
-	t.Cleanup(func() { srv.Close() })
-	return srv.Addr().String()
+	})
 }
 
 func TestPerDatabaseGrants(t *testing.T) {
@@ -319,23 +303,11 @@ func TestAuthNotEnabled(t *testing.T) {
 // recording every byte of the handshake must never observe the password.
 func TestPasswordNeverSentOverTheWire(t *testing.T) {
 	const password = "correct-horse-battery-staple"
-	cfg := &server.Config{
-		Listen: server.ListenConfig{Host: "127.0.0.1", Port: 0},
-		Auth: server.AuthConfig{
-			Iterations: testIterations,
-			Users:      map[string]server.UserConfig{"alice": {Password: password}},
-		},
-		Databases: map[string]server.DatabaseConfig{
-			"test": {Path: filepath.Join(t.TempDir(), "test.sqlite3")},
-		},
-	}
-	srv := server.New(cfg)
-	if err := srv.Start(); err != nil {
-		t.Fatalf("start server: %v", err)
-	}
-	t.Cleanup(func() { srv.Close() })
+	addr := serve(t, &server.Config{Auth: server.AuthConfig{
+		Users: map[string]server.UserConfig{"alice": {Verifier: verifierFor(t, password)}},
+	}})
 
-	proxyAddr, recorded := startRecordingProxy(t, srv.Addr().String())
+	proxyAddr, recorded := startRecordingProxy(t, addr)
 
 	db := openDSN(t, authDSN(proxyAddr, "alice", password))
 	if err := db.Ping(); err != nil {

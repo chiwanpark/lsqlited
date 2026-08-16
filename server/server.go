@@ -7,37 +7,22 @@ import (
 	"context"
 	"crypto/tls"
 	"database/sql"
-	"database/sql/driver"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
-	"net/url"
 	"os"
-	"runtime"
 	"strconv"
-	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/chiwanpark/lsqlited/internal/auth"
 	"github.com/chiwanpark/lsqlited/internal/protocol"
-	"github.com/chiwanpark/lsqlited/internal/version"
-	sqlite3 "github.com/mattn/go-sqlite3" // CGO-based SQLite driver, registered as "sqlite3"
 )
 
-const defaultBusyTimeoutMS = 5000
-
-// baseDriverName is used for databases that load no extension. It is stock
-// SQLite plus the lsqlited_version() function, which every database gets.
-const baseDriverName = version.DriverName
-
-// tlsHandshakeTimeout bounds how long a client may take to complete the TLS
-// handshake, so that a peer that connects and then goes quiet cannot pin a
-// goroutine indefinitely.
+// tlsHandshakeTimeout bounds how long a client may take over the handshake,
+// so that a peer that connects and goes quiet cannot pin a goroutine.
 const tlsHandshakeTimeout = 15 * time.Second
 
 // Option customizes a Server.
@@ -49,30 +34,25 @@ func WithLogger(logger *slog.Logger) Option {
 }
 
 // WithTLSConfig serves TLS using the given configuration, overriding the
-// `tls` section of the configuration file. It is meant for callers that
-// embed the server and manage certificates themselves, for example to rotate
-// them through tls.Config.GetCertificate.
+// `tls` section of the configuration file. It is meant for callers that embed
+// the server and manage certificates themselves.
 func WithTLSConfig(cfg *tls.Config) Option {
 	return func(s *Server) { s.tlsConfig = cfg }
 }
-
-// errAuthFailed is deliberately vague: telling the client whether the user
-// name or the password was wrong would let it enumerate accounts.
-var errAuthFailed = errors.New("authentication failed")
 
 // Server serves SQLite databases over TCP.
 type Server struct {
 	cfg    *Config
 	logger *slog.Logger
 
-	// tlsConfig is nil when the server serves plaintext TCP. It is set by
-	// WithTLSConfig or derived from Config.TLS by Start.
+	// tlsConfig is nil when the server serves plaintext TCP.
 	tlsConfig *tls.Config
 
-	// accounts and authSecret are written once by Start, before any
-	// connection is accepted, and only read afterwards.
-	accounts   map[string]*Account
-	authSecret []byte
+	// accounts, authSecret and decoyIterations are written once by Start,
+	// before any connection is accepted, and only read afterwards.
+	accounts        map[string]*Account
+	authSecret      []byte
+	decoyIterations int
 
 	mu     sync.Mutex
 	ln     net.Listener
@@ -98,7 +78,7 @@ func New(cfg *Config, opts ...Option) *Server {
 }
 
 // Start binds the listener and begins accepting connections in the
-// background. It returns immediately; use Close to shut the server down.
+// background. Use Close to shut the server down.
 func (s *Server) Start() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -120,8 +100,8 @@ func (s *Server) Start() error {
 		return fmt.Errorf("server: listen on %s: %w", addr, err)
 	}
 	if s.tlsConfig != nil {
-		// Wrapping the listener keeps the rest of the server working on a
-		// plain net.Conn: TLS is entirely a transport concern here.
+		// Wrapping the listener keeps the rest of the server on a plain
+		// net.Conn: TLS is entirely a transport concern here.
 		ln = tls.NewListener(ln, s.tlsConfig)
 	}
 	s.ln = ln
@@ -130,8 +110,8 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// initAuth derives the credentials of every configured account and the
-// per-process secret used to fabricate challenges for unknown users.
+// initAuth derives the credentials of every account and the per-process
+// secret used to fabricate challenges for unknown users.
 func (s *Server) initAuth() error {
 	accounts, err := s.cfg.Auth.Accounts()
 	if err != nil {
@@ -143,6 +123,7 @@ func (s *Server) initAuth() error {
 	}
 	s.accounts = accounts
 	s.authSecret = secret
+	s.decoyIterations = decoyIterations(accounts)
 	return nil
 }
 
@@ -160,8 +141,7 @@ func (s *Server) initTLS() error {
 	return nil
 }
 
-// authEnabled reports whether clients must authenticate before issuing any
-// other request.
+// authEnabled reports whether clients must authenticate first.
 func (s *Server) authEnabled() bool { return len(s.accounts) > 0 }
 
 // TLSEnabled reports whether the server encrypts its connections. It is only
@@ -178,12 +158,11 @@ func (s *Server) account(user string) (*Account, bool) {
 	if a, ok := s.accounts[user]; ok {
 		return a, true
 	}
-	decoy := auth.DecoyVerifier(s.authSecret, user, s.cfg.Auth.iterations())
+	decoy := auth.DecoyVerifier(s.authSecret, user, s.decoyIterations)
 	return &Account{Verifier: decoy}, false
 }
 
-// Addr returns the address the server is listening on, or nil if the server
-// has not been started.
+// Addr returns the address the server listens on, or nil before Start.
 func (s *Server) Addr() net.Addr {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -193,8 +172,8 @@ func (s *Server) Addr() net.Addr {
 	return s.ln.Addr()
 }
 
-// Close stops accepting connections, terminates active connections, waits
-// for handlers to finish, and closes all open databases.
+// Close stops accepting connections, terminates active ones, waits for
+// handlers to finish, and closes all open databases.
 func (s *Server) Close() error {
 	s.mu.Lock()
 	if s.closed {
@@ -229,6 +208,32 @@ func (s *Server) Close() error {
 		}
 	}
 	return firstErr
+}
+
+// getDB returns the lazily opened *sql.DB for a configured database name.
+func (s *Server) getDB(name string) (*sql.DB, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("server is shutting down")
+	}
+	if db, ok := s.dbs[name]; ok {
+		return db, nil
+	}
+	path, ok := s.cfg.Databases[name]
+	if !ok {
+		return nil, fmt.Errorf("unknown database %q", name)
+	}
+	db, err := openSQLite(path, s.cfg)
+	if err != nil {
+		return nil, fmt.Errorf("open database %q: %w", name, err)
+	}
+	if len(s.cfg.Extensions) > 0 {
+		s.logger.Debug("loaded sqlite extensions", "database", name,
+			"extensions", s.cfg.Extensions.strings())
+	}
+	s.dbs[name] = db
+	return db, nil
 }
 
 func (s *Server) acceptLoop(ln net.Listener) {
@@ -281,7 +286,7 @@ func (s *Server) handleConn(conn net.Conn) {
 
 	for {
 		// A transaction holds the write lock, so a session that abandons one
-		// is not waited for indefinitely: the read deadline ends the session,
+		// is not waited for indefinitely: the read deadline ends the session
 		// and the deferred cleanup rolls the transaction back.
 		if err := conn.SetReadDeadline(sess.idleDeadline()); err != nil {
 			return
@@ -302,12 +307,12 @@ func (s *Server) handleConn(conn net.Conn) {
 		}
 		resp := sess.handle(ctx, &req)
 		if resp == nil {
-			// The client vanished while its statement ran, so there is
-			// nobody left to answer.
+			// The client vanished while its statement ran, so there is nobody
+			// left to answer.
 			logger.Debug("client disconnected during statement")
 			return
 		}
-		if err := protocol.WriteMessage(conn, resp); err != nil {
+		if err := writeResponse(conn, resp); err != nil {
 			if !errors.Is(err, net.ErrClosed) {
 				logger.Debug("write response failed", "error", err)
 			}
@@ -316,10 +321,23 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 }
 
-// tlsHandshake completes the TLS handshake, if any, under a deadline. Doing
-// it here rather than letting the first Read trigger it lets the server log a
-// handshake failure and bound how long it waits for one. It reports whether
-// the connection is ready to carry requests.
+// writeResponse sends resp, substituting a classified error when the body
+// does not fit in a protocol frame. WriteMessage rejects such a body before
+// writing any of it, so the substitute reaches the client on an intact
+// connection instead of the connection simply dropping.
+func writeResponse(w io.Writer, resp *protocol.Response) error {
+	err := protocol.WriteMessage(w, resp)
+	if errors.Is(err, protocol.ErrMessageTooLarge) {
+		return protocol.WriteMessage(w, codeResponse(protocol.CodeResponseTooLarge,
+			"result exceeds the maximum message size of %d bytes", protocol.MaxMessageSize))
+	}
+	return err
+}
+
+// tlsHandshake completes the TLS handshake, if any, under a deadline. Doing it
+// here rather than letting the first Read trigger it lets the server log a
+// failure and bound how long it waits. It reports whether the connection is
+// ready to carry requests.
 func tlsHandshake(ctx context.Context, conn net.Conn, logger *slog.Logger) bool {
 	tc, ok := conn.(*tls.Conn)
 	if !ok {
@@ -340,708 +358,4 @@ func tlsHandshake(ctx context.Context, conn net.Conn, logger *slog.Logger) bool 
 		"version", tls.VersionName(state.Version),
 		"cipher", tls.CipherSuiteName(state.CipherSuite))
 	return true
-}
-
-// getDB returns the lazily opened *sql.DB for a configured database name.
-func (s *Server) getDB(name string) (*sql.DB, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return nil, errors.New("server is shutting down")
-	}
-	if db, ok := s.dbs[name]; ok {
-		return db, nil
-	}
-	cfg, ok := s.cfg.databaseConfig(name)
-	if !ok {
-		return nil, fmt.Errorf("unknown database %q", name)
-	}
-	db, err := openSQLite(cfg, s.cfg.Params, s.cfg.Extensions)
-	if err != nil {
-		return nil, fmt.Errorf("open database %q: %w", name, err)
-	}
-	if len(s.cfg.Extensions) > 0 || len(cfg.Extensions) > 0 {
-		s.logger.Debug("loaded sqlite extensions", "database", name,
-			"extensions", s.cfg.Extensions.merge(cfg.Extensions).strings())
-	}
-	s.dbs[name] = db
-	return db, nil
-}
-
-// sqliteDSN builds the "file:" URI used to open a database. Parameters are
-// applied in increasing order of precedence: built-in defaults, server-wide
-// params, then the database's own params.
-func sqliteDSN(cfg DatabaseConfig, global Params) string {
-	defaults := Params{"_busy_timeout": strconv.Itoa(defaultBusyTimeoutMS)}
-	params := defaults.merge(global).merge(cfg.Params)
-
-	q := url.Values{}
-	for key, val := range params {
-		q.Set(key, val)
-	}
-	return "file:" + cfg.Path + "?" + q.Encode()
-}
-
-// idleConnTimeout releases a pooled connection that has gone unused for a
-// while, so that a database which saw a burst and then went quiet gives back
-// the page cache each of its connections holds.
-const idleConnTimeout = 5 * time.Minute
-
-// configurePool sizes the connection pool of a database. SQLite runs
-// statements on separate connections in parallel — readers never block one
-// another, and only writers take turns — so the pool is what decides how
-// much of that parallelism the daemon can use.
-//
-// It also decides how often a connection is opened rather than reused, which
-// matters more than it sounds: database/sql keeps two connections idle by
-// default, so a database busier than that pays on most statements for a file
-// to open, a schema to parse and every extension to load again. Keeping as
-// many connections warm as the database is allowed to open avoids that
-// entirely.
-func configurePool(db *sql.DB, maxConns int) {
-	idle := defaultIdleConns()
-	if maxConns > 0 {
-		db.SetMaxOpenConns(maxConns)
-		idle = maxConns
-	}
-	db.SetMaxIdleConns(idle)
-	db.SetConnMaxIdleTime(idleConnTimeout)
-}
-
-// defaultIdleConns is how many connections a database keeps warm when
-// nothing bounds its pool. Statements are CPU-bound once the pages are
-// cached, so a core's worth of connections is enough to keep the machine
-// busy; a burst may open more, they are simply not all kept.
-func defaultIdleConns() int {
-	return max(4, runtime.NumCPU())
-}
-
-func openSQLite(cfg DatabaseConfig, global Params, globalExts Extensions) (*sql.DB, error) {
-	exts := globalExts.merge(cfg.Extensions)
-	db, err := sql.Open(sqliteDriver(exts), sqliteDSN(cfg, global))
-	if err != nil {
-		return nil, err
-	}
-	configurePool(db, cfg.MaxConnections)
-	// Extensions are loaded when a connection is made, not by sql.Open, so
-	// a missing library only surfaces on the first use. Pinging here keeps
-	// that failure attached to opening the database rather than to whatever
-	// query happened to run first.
-	if err := db.Ping(); err != nil {
-		db.Close()
-		if len(exts) > 0 {
-			return nil, fmt.Errorf("%w (extensions: %s)", err, strings.Join(exts.strings(), ", "))
-		}
-		return nil, err
-	}
-	return db, nil
-}
-
-// sqliteDrivers memoizes the driver registered for a given set of
-// extensions. database/sql panics when the same driver name is registered
-// twice, so a server that is restarted, or two databases sharing a set of
-// extensions, must reuse the driver registered the first time around.
-var sqliteDrivers = struct {
-	sync.Mutex
-	names map[string]string
-}{names: make(map[string]string)}
-
-// sqliteDriver returns the name of a database/sql driver that loads exts
-// into every connection it opens, registering one if needed. Extensions
-// cannot be attached to an existing connection pool, so each distinct set
-// needs a driver of its own.
-func sqliteDriver(exts Extensions) string {
-	if len(exts) == 0 {
-		return baseDriverName
-	}
-	key := strings.Join(exts.strings(), "\x00")
-	sqliteDrivers.Lock()
-	defer sqliteDrivers.Unlock()
-	if name, ok := sqliteDrivers.names[key]; ok {
-		return name
-	}
-	name := fmt.Sprintf("%s_ext%d", baseDriverName, len(sqliteDrivers.names)+1)
-	sql.Register(name, &sqlite3.SQLiteDriver{
-		// Entries without an entry point are handed to the driver, which
-		// lets SQLite derive the initialization symbol itself.
-		Extensions:  exts.defaultEntrypoints(),
-		ConnectHook: extensionHook(exts),
-	})
-	sqliteDrivers.names[key] = name
-	return name
-}
-
-// extensionHook returns a connect hook that registers lsqlited_version() and
-// loads every extension that names an entry point. Extensions without one
-// are handed to the driver instead, which lets SQLite derive the symbol.
-func extensionHook(exts Extensions) func(*sqlite3.SQLiteConn) error {
-	var named Extensions
-	for _, ext := range exts {
-		if ext.Entrypoint != "" {
-			named = append(named, ext)
-		}
-	}
-	return func(conn *sqlite3.SQLiteConn) error {
-		if err := version.Register(conn); err != nil {
-			return err
-		}
-		for _, ext := range named {
-			if err := conn.LoadExtension(ext.Path, ext.Entrypoint); err != nil {
-				return fmt.Errorf("load extension %s: %w", ext, err)
-			}
-		}
-		return nil
-	}
-}
-
-// queryer abstracts *sql.DB and *sql.Tx.
-type queryer interface {
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-}
-
-// peer is the client end of a connection: the socket and the buffered reader
-// the request loop reads from.
-type peer struct {
-	conn net.Conn
-	br   *bufio.Reader
-}
-
-// watch cancels a running statement when the client goes away, so that work
-// nobody will collect does not keep a core busy. It returns a stop function
-// that must be called before the request loop reads again, and which reports
-// whether the connection is gone.
-//
-// Peek does not consume, so a request the client pipelined behind the current
-// one is still there afterwards. The blocked Peek is released with a read
-// deadline rather than by closing the connection, since the connection is
-// still wanted when the statement finishes first; the deadline is lifted
-// again before the loop resumes.
-func (p *peer) watch(cancel context.CancelFunc) (stop func() (gone bool)) {
-	if p == nil {
-		return func() bool { return false }
-	}
-	var gone, stopping atomic.Bool
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		// A read error means the peer hung up, unless it is the deadline
-		// this watcher was asked to stop with.
-		if _, err := p.br.Peek(1); err != nil && !stopping.Load() {
-			gone.Store(true)
-			cancel()
-		}
-	}()
-	return func() bool {
-		stopping.Store(true)
-		p.conn.SetReadDeadline(time.Now())
-		<-done
-		p.conn.SetReadDeadline(time.Time{})
-		return gone.Load()
-	}
-}
-
-// transaction is a client transaction. It is pinned to one SQLite
-// connection for its whole life, because that is where SQLite keeps the
-// locks and the uncommitted pages: statements of the same transaction that
-// landed on different connections would be different transactions.
-type transaction struct {
-	conn     *sql.Conn
-	readOnly bool
-	// idleTimeout bounds how long the session may leave the transaction
-	// alone before the daemon rolls it back. Zero waits forever.
-	idleTimeout time.Duration
-}
-
-// begin opens the transaction.
-//
-// A transaction that may write takes the write lock now rather than on its
-// first write. SQLite refuses to hand the lock to a transaction that has
-// already read when another connection wrote in the meantime — it returns
-// SQLITE_BUSY at once and does not wait, since waiting could deadlock — so a
-// read-then-write transaction fails outright often enough to matter. Asking
-// up front turns that into an ordinary wait, bounded by _busy_timeout.
-//
-// A read-only transaction has nothing to upgrade, so it starts deferred and
-// runs alongside every other reader. query_only keeps that promise true even
-// if the client sends a write after all.
-func (t *transaction) begin(ctx context.Context) error {
-	if !t.readOnly {
-		_, err := t.conn.ExecContext(ctx, "BEGIN IMMEDIATE")
-		return err
-	}
-	if _, err := t.conn.ExecContext(ctx, "PRAGMA query_only = ON"); err != nil {
-		return err
-	}
-	_, err := t.conn.ExecContext(ctx, "BEGIN")
-	return err
-}
-
-// end finishes the transaction with COMMIT or ROLLBACK and gives the
-// connection back to the pool. A connection whose transaction state is no
-// longer certain is discarded instead: reusing it would hand someone else a
-// connection that is still inside a transaction, or still read-only.
-func (t *transaction) end(ctx context.Context, statement string) error {
-	if _, err := t.conn.ExecContext(ctx, statement); err != nil {
-		t.discard()
-		return err
-	}
-	if t.readOnly {
-		if _, err := t.conn.ExecContext(ctx, "PRAGMA query_only = OFF"); err != nil {
-			// The transaction itself ended cleanly, so this is not the
-			// client's problem; only the connection is unusable.
-			t.discard()
-			return nil
-		}
-	}
-	return t.conn.Close()
-}
-
-// discard closes the connection and keeps the pool from handing it out
-// again. Returning driver.ErrBadConn is how database/sql is told that a
-// connection is spent.
-func (t *transaction) discard() {
-	t.conn.Raw(func(any) error { return driver.ErrBadConn })
-	t.conn.Close()
-}
-
-// session holds per-connection state, most importantly the authenticated
-// user and an in-progress transaction, if any.
-type session struct {
-	srv    *Server
-	logger *slog.Logger
-	tx     *transaction
-	// peer is the connection the session serves. It is nil when there is no
-	// connection to watch, which leaves statements running until they finish
-	// or time out.
-	peer *peer
-
-	// user is the authenticated account name, empty until the handshake
-	// completes, and account is the matching entry from the configuration.
-	user    string
-	account *Account
-	// pending holds the state of a handshake between auth_init and auth.
-	pending *pendingAuth
-}
-
-// pendingAuth is the challenge a session has issued and is waiting on.
-type pendingAuth struct {
-	user        string
-	account     *Account
-	authMessage string
-	// known is false when the challenge was fabricated for an unknown user.
-	known bool
-}
-
-// idleDeadline is how long the session may stay quiet before the daemon
-// gives up on it. Only a session holding a transaction has one, since only
-// that one is holding something back.
-func (sess *session) idleDeadline() time.Time {
-	if sess.tx == nil || sess.tx.idleTimeout <= 0 {
-		return time.Time{}
-	}
-	return time.Now().Add(sess.tx.idleTimeout)
-}
-
-func (sess *session) cleanup() {
-	if sess.tx != nil {
-		// A client that goes away mid-transaction must not leave the write
-		// lock behind it, so the rollback is not allowed to wait on the
-		// client's context, which is already done.
-		sess.tx.end(context.Background(), "ROLLBACK")
-		sess.tx = nil
-	}
-}
-
-// handle answers a single request. It returns nil when the client
-// disconnected while its statement ran and no response is owed.
-func (sess *session) handle(ctx context.Context, req *protocol.Request) *protocol.Response {
-	switch req.Type {
-	case protocol.TypeAuthInit:
-		return sess.handleAuthInit(req)
-	case protocol.TypeAuth:
-		return sess.handleAuth(req)
-	}
-	if sess.srv.authEnabled() {
-		if sess.user == "" {
-			return errResponse(errors.New("authentication required"))
-		}
-		// Authorization is checked on every request rather than once at
-		// login: a client is free to name a different database per
-		// request, so the session's initial choice cannot be trusted.
-		if req.Database != "" && !sess.account.CanAccess(req.Database) {
-			sess.logger.Warn("access denied", "user", sess.user, "database", req.Database)
-			return errResponse(fmt.Errorf("access to database %q is not permitted", req.Database))
-		}
-	}
-	switch req.Type {
-	case protocol.TypePing:
-		return sess.handlePing(ctx, req)
-	case protocol.TypeBegin:
-		return sess.handleBegin(ctx, req)
-	case protocol.TypeCommit:
-		return sess.handleCommit(ctx, req)
-	case protocol.TypeRollback:
-		return sess.handleRollback(ctx, req)
-	case protocol.TypeQuery, protocol.TypeExec:
-		return sess.handleStatement(ctx, req)
-	default:
-		return errResponse(fmt.Errorf("unknown request type %q", req.Type))
-	}
-}
-
-// handleAuthInit answers the first handshake message with a challenge. The
-// reply is shaped identically for known and unknown accounts.
-func (sess *session) handleAuthInit(req *protocol.Request) *protocol.Response {
-	if !sess.srv.authEnabled() {
-		return errResponse(errors.New("authentication is not enabled on this server"))
-	}
-	if sess.user != "" {
-		return errResponse(errors.New("already authenticated"))
-	}
-	if req.User == "" {
-		return errResponse(errors.New("missing user name"))
-	}
-	clientNonce, err := base64.StdEncoding.DecodeString(req.Nonce)
-	if err != nil || len(clientNonce) < auth.MinNonceLen {
-		return errResponse(errors.New("invalid client nonce"))
-	}
-	serverNonce, err := auth.Nonce()
-	if err != nil {
-		return errResponse(err)
-	}
-	account, known := sess.srv.account(req.User)
-	verifier := account.Verifier
-	sess.pending = &pendingAuth{
-		user:    req.User,
-		account: account,
-		known:   known,
-		authMessage: auth.AuthMessage(req.User, clientNonce, serverNonce,
-			verifier.Salt, verifier.Iterations),
-	}
-	return &protocol.Response{Auth: &protocol.AuthChallenge{
-		Salt:       base64.StdEncoding.EncodeToString(verifier.Salt),
-		Iterations: verifier.Iterations,
-		Nonce:      base64.StdEncoding.EncodeToString(serverNonce),
-	}}
-}
-
-// handleAuth checks the client proof and, on success, returns the server
-// signature so the client can authenticate the server in turn.
-func (sess *session) handleAuth(req *protocol.Request) *protocol.Response {
-	if sess.user != "" {
-		return errResponse(errors.New("already authenticated"))
-	}
-	pending := sess.pending
-	// A challenge is single use: a failed attempt must start over, which
-	// forces a fresh nonce and rules out offline proof grinding.
-	sess.pending = nil
-	if pending == nil {
-		return errResponse(errors.New("authentication has not been initiated"))
-	}
-	proof, err := base64.StdEncoding.DecodeString(req.Proof)
-	// Always verify, even for unknown users, so that failures cost the same.
-	valid := err == nil && pending.account.Verifier.Verify(pending.authMessage, proof)
-	if !pending.known || !valid {
-		sess.logger.Warn("authentication failed", "user", pending.user)
-		return errResponse(errAuthFailed)
-	}
-	sess.user = pending.user
-	sess.account = pending.account
-	sess.logger.Debug("authenticated", "user", sess.user)
-	return &protocol.Response{
-		Signature: base64.StdEncoding.EncodeToString(
-			pending.account.Verifier.ServerSignature(pending.authMessage)),
-	}
-}
-
-func (sess *session) handlePing(ctx context.Context, req *protocol.Request) *protocol.Response {
-	if req.Database != "" {
-		db, err := sess.srv.getDB(req.Database)
-		if err != nil {
-			return errResponse(err)
-		}
-		if err := db.PingContext(ctx); err != nil {
-			return errResponse(err)
-		}
-	}
-	return &protocol.Response{}
-}
-
-func (sess *session) handleBegin(ctx context.Context, req *protocol.Request) *protocol.Response {
-	if sess.tx != nil {
-		return errResponse(errors.New("transaction already in progress"))
-	}
-	db, err := sess.srv.getDB(req.Database)
-	if err != nil {
-		return errResponse(err)
-	}
-	// Beginning can wait: for a free connection when the pool is bounded,
-	// and for the write lock when another transaction holds it. Both are
-	// bounded by the same timeout a statement gets.
-	limits := sess.srv.limits(req)
-	timeout := limits.timeout
-	ctx, cancel := statementContext(ctx, timeout)
-	defer cancel()
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return statementResponse(ctx, err, timeout)
-	}
-	tx := &transaction{
-		conn:        conn,
-		readOnly:    req.ReadOnly,
-		idleTimeout: limits.transactionTimeout,
-	}
-	if err := tx.begin(ctx); err != nil {
-		tx.discard()
-		return statementResponse(ctx, err, timeout)
-	}
-	sess.tx = tx
-	return &protocol.Response{}
-}
-
-func (sess *session) handleCommit(ctx context.Context, req *protocol.Request) *protocol.Response {
-	return sess.endTransaction(ctx, req, "COMMIT")
-}
-
-func (sess *session) handleRollback(ctx context.Context, req *protocol.Request) *protocol.Response {
-	return sess.endTransaction(ctx, req, "ROLLBACK")
-}
-
-// endTransaction finishes the session's transaction. The transaction is let
-// go whatever happens: a COMMIT that fails has left nothing to commit, and a
-// session holding on to it would keep the write lock from everyone else.
-func (sess *session) endTransaction(ctx context.Context, req *protocol.Request, statement string) *protocol.Response {
-	if sess.tx == nil {
-		return errResponse(errors.New("no transaction in progress"))
-	}
-	tx := sess.tx
-	sess.tx = nil
-	timeout := sess.srv.limits(req).timeout
-	ctx, cancel := statementContext(ctx, timeout)
-	defer cancel()
-	if err := tx.end(ctx, statement); err != nil {
-		return statementResponse(ctx, err, timeout)
-	}
-	return &protocol.Response{}
-}
-
-// limits resolves the bounds that apply to a request: the daemon's own
-// safety net for the database it names, tightened by whatever the client
-// asked for. A client can only ask for less, never for more.
-func (s *Server) limits(req *protocol.Request) statementLimits {
-	limits := s.cfg.Limits.resolve(s.cfg.Databases[req.Database].Limits)
-	if req.TimeoutMS > 0 {
-		requested := time.Duration(req.TimeoutMS) * time.Millisecond
-		limits.timeout = minNonZero(limits.timeout, requested)
-	}
-	if req.MaxRows > 0 {
-		limits.maxRows = minNonZero(limits.maxRows, req.MaxRows)
-	}
-	return limits
-}
-
-func (sess *session) handleStatement(ctx context.Context, req *protocol.Request) *protocol.Response {
-	args, err := protocol.DecodeValues(req.Args)
-	if err != nil {
-		return errResponse(err)
-	}
-	var q queryer
-	if sess.tx != nil {
-		q = sess.tx.conn
-	} else {
-		db, err := sess.srv.getDB(req.Database)
-		if err != nil {
-			return errResponse(err)
-		}
-		q = db
-	}
-
-	limits := sess.srv.limits(req)
-	// The statement runs under a context so that SQLite is interrupted when
-	// the deadline passes, rather than the result merely being abandoned.
-	ctx, cancel := statementContext(ctx, limits.timeout)
-	defer cancel()
-	// Nothing else is read from the connection while the statement runs, so
-	// the reader is free for the watcher.
-	stop := sess.peer.watch(cancel)
-
-	var resp *protocol.Response
-	if req.Type == protocol.TypeQuery {
-		resp = runQuery(ctx, q, req.Query, args, limits)
-	} else {
-		resp = runExec(ctx, q, req.Query, args, limits)
-	}
-
-	if stop() {
-		return nil
-	}
-	if resp.Code == protocol.CodeTimeout {
-		sess.logger.Debug("statement timed out", "database", req.Database, "timeout", limits.timeout)
-	}
-	return resp
-}
-
-// statementContext derives the context a statement runs under. A zero
-// timeout leaves it unbounded, as it is when nothing is configured.
-func statementContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
-	if timeout <= 0 {
-		return context.WithCancel(ctx)
-	}
-	return context.WithTimeout(ctx, timeout)
-}
-
-func runQuery(ctx context.Context, q queryer, query string, args []any, limits statementLimits) *protocol.Response {
-	rows, err := q.QueryContext(ctx, query, args...)
-	if err != nil {
-		return statementResponse(ctx, err, limits.timeout)
-	}
-	defer rows.Close()
-
-	cols, err := rows.Columns()
-	if err != nil {
-		return statementResponse(ctx, err, limits.timeout)
-	}
-	resp := &protocol.Response{Columns: cols, ColumnTypes: columnTypes(rows)}
-	// size grows with the result so that an oversized one is stopped while
-	// it is being built, before the memory has been spent on it.
-	size := envelopeSize(cols, resp.ColumnTypes)
-	for rows.Next() {
-		if limits.maxRows > 0 && int64(len(resp.Rows)) >= limits.maxRows {
-			// Row N+1 exists. Closing the rows interrupts the statement,
-			// so the rest of the result is never computed.
-			rows.Close()
-			return codeResponse(protocol.CodeTooManyRows,
-				"result exceeds the row limit of %d", limits.maxRows)
-		}
-		vals := make([]any, len(cols))
-		ptrs := make([]any, len(cols))
-		for i := range vals {
-			ptrs[i] = &vals[i]
-		}
-		if err := rows.Scan(ptrs...); err != nil {
-			return statementResponse(ctx, err, limits.timeout)
-		}
-		encoded, err := protocol.EncodeValues(vals)
-		if err != nil {
-			return errResponse(err)
-		}
-		if encoded == nil {
-			encoded = []protocol.Value{}
-		}
-		if size += rowSize(encoded); size > limits.maxResponseBytes {
-			rows.Close()
-			return codeResponse(protocol.CodeResponseTooLarge,
-				"result exceeds the response size limit of %d bytes", limits.maxResponseBytes)
-		}
-		resp.Rows = append(resp.Rows, encoded)
-	}
-	if err := rows.Err(); err != nil {
-		return statementResponse(ctx, err, limits.timeout)
-	}
-	return resp
-}
-
-// columnTypes reports the declared type of every column. Expressions,
-// literals and aggregates have none and come back empty. Types are read from
-// the statement rather than guessed from the values, so they are reported
-// even for a result with no rows.
-func columnTypes(rows *sql.Rows) []string {
-	types, err := rows.ColumnTypes()
-	if err != nil {
-		return nil
-	}
-	out := make([]string, len(types))
-	for i, t := range types {
-		out[i] = t.DatabaseTypeName()
-	}
-	return out
-}
-
-// JSON punctuation surrounding an encoded value, row and response. Sizes are
-// estimated rather than measured: escaping quotes and control characters can
-// make the real body a little larger, which is why the frame limit of the
-// protocol stays as the final backstop.
-const (
-	valueOverhead    = int64(len(`{"t":"","v":""},`))
-	rowOverhead      = int64(len(`[],`))
-	columnOverhead   = int64(len(`"",`))
-	envelopeOverhead = int64(len(`{"columns":[],"column_types":[],"rows":[]}`))
-)
-
-// envelopeSize estimates the encoded size of a result that carries no rows.
-func envelopeSize(cols, types []string) int64 {
-	size := envelopeOverhead
-	for _, name := range cols {
-		size += int64(len(name)) + columnOverhead
-	}
-	for _, name := range types {
-		size += int64(len(name)) + columnOverhead
-	}
-	return size
-}
-
-// rowSize estimates the encoded size of one row.
-func rowSize(vals []protocol.Value) int64 {
-	size := rowOverhead
-	for _, v := range vals {
-		size += int64(len(v.T)) + int64(len(v.V)) + valueOverhead
-	}
-	return size
-}
-
-func runExec(ctx context.Context, q queryer, query string, args []any, limits statementLimits) *protocol.Response {
-	res, err := q.ExecContext(ctx, query, args...)
-	if err != nil {
-		return statementResponse(ctx, err, limits.timeout)
-	}
-	resp := &protocol.Response{}
-	if id, err := res.LastInsertId(); err == nil {
-		resp.LastInsertID = id
-	}
-	if n, err := res.RowsAffected(); err == nil {
-		resp.RowsAffected = n
-	}
-	return resp
-}
-
-// errResponse reports a failure whose cause the client cannot classify. The
-// message is passed through verbatim, so SQLite's own wording reaches the
-// user who wrote the statement.
-func errResponse(err error) *protocol.Response {
-	return &protocol.Response{Error: err.Error()}
-}
-
-// codeResponse reports a failure the client can act on, such as a statement
-// that ran out of time or a result that outgrew a limit.
-func codeResponse(code, format string, args ...any) *protocol.Response {
-	return &protocol.Response{Error: fmt.Sprintf(format, args...), Code: code}
-}
-
-// statementResponse turns the failure of a statement or a transaction into a
-// response, naming the reasons a client can do something about. SQLite's own
-// message is kept in every case; only the code is added.
-func statementResponse(ctx context.Context, err error, timeout time.Duration) *protocol.Response {
-	switch {
-	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		// SQLite reports the interruption in its own words, which say
-		// nothing about a deadline; the code is what tells the client that
-		// its statement ran out of time.
-		return codeResponse(protocol.CodeTimeout, "statement exceeded the time limit of %s", timeout)
-	case isBusy(err):
-		return &protocol.Response{Error: err.Error(), Code: protocol.CodeBusy}
-	default:
-		return errResponse(err)
-	}
-}
-
-// isBusy reports whether err is SQLite refusing to wait any longer for a
-// lock another connection holds. Nothing is wrong with the statement, so the
-// client is told to try again rather than to fix it.
-func isBusy(err error) bool {
-	var sqliteErr sqlite3.Error
-	if !errors.As(err, &sqliteErr) {
-		return false
-	}
-	return sqliteErr.Code == sqlite3.ErrBusy || sqliteErr.Code == sqlite3.ErrLocked
 }

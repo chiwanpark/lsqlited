@@ -9,23 +9,10 @@ import (
 	"github.com/chiwanpark/lsqlited/internal/tlsutil"
 )
 
-// SSL modes accepted by the ssl_mode DSN parameter. They follow the
-// well-known libpq semantics, minus the modes that depend on in-band
-// negotiation.
 const (
-	// SSLModeDisable speaks the protocol over plaintext TCP. It is the
-	// default, for compatibility with servers that have no certificate.
-	SSLModeDisable = "disable"
-	// SSLModeRequire encrypts the connection but accepts any certificate.
-	// It stops passive eavesdropping and nothing else: an attacker able to
-	// redirect the connection can still impersonate the server.
-	SSLModeRequire = "require"
-	// SSLModeVerifyCA additionally requires the server certificate to chain
-	// to a trusted CA, but does not check that it names the host dialed.
-	SSLModeVerifyCA = "verify-ca"
-	// SSLModeVerifyFull additionally requires the certificate to name the
-	// host dialed. This is the only mode that defends against an active
-	// attacker, and the one to prefer.
+	SSLModeDisable    = "disable"
+	SSLModeRequire    = "require"
+	SSLModeVerifyCA   = "verify-ca"
 	SSLModeVerifyFull = "verify-full"
 )
 
@@ -34,21 +21,18 @@ type sslOptions struct {
 	mode string
 	// ca is a PEM bundle of trusted CAs; empty means the system pool.
 	ca string
-	// cert and key are the client certificate presented to servers that
-	// ask for one (mutual TLS).
+	// cert and key are the client certificate presented for mutual TLS.
 	cert string
 	key  string
 	// serverName overrides the host name used for SNI and, in verify-full
-	// mode, for certificate verification. Useful when connecting by IP.
+	// mode, for verification. Useful when connecting by IP.
 	serverName string
 }
 
-// parseSSLOptions extracts the ssl_* parameters from a parsed DSN query.
-//
-// The mode defaults to "disable" so that existing DSNs keep working, but
-// naming any other ssl_* parameter implies "verify-full": having gone to the
-// trouble of pointing at a CA or a client certificate, silently staying in
-// cleartext would be the wrong answer.
+// parseSSLOptions extracts the ssl_* parameters from a parsed DSN query. The
+// mode defaults to "disable" so that existing DSNs keep working, but naming
+// any other ssl_* parameter implies "verify-full": having gone to the trouble
+// of pointing at a CA, silently staying in cleartext would be wrong.
 func parseSSLOptions(q url.Values) (sslOptions, error) {
 	opts := sslOptions{
 		mode:       q.Get("ssl_mode"),
@@ -100,9 +84,8 @@ func (o sslOptions) tlsConfig(host string) (*tls.Config, error) {
 	}
 	cfg := &tls.Config{
 		MinVersion: tlsutil.MinVersion,
-		// Always set, even when verification is off: crypto/tls also uses
-		// it as the SNI name, which many servers need to pick a
-		// certificate. It is ignored for IP literals.
+		// Always set, even when verification is off: crypto/tls also uses it
+		// as the SNI name, which many servers need to pick a certificate.
 		ServerName: serverName,
 	}
 	if o.cert != "" {

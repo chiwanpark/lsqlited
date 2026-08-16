@@ -65,9 +65,9 @@ func TestDeriveVerifierRFC7677(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode salt: %v", err)
 	}
-	v, err := DeriveVerifier("pencil", salt, 4096)
+	v, err := deriveVerifier("pencil", salt, 4096)
 	if err != nil {
-		t.Fatalf("DeriveVerifier: %v", err)
+		t.Fatalf("deriveVerifier: %v", err)
 	}
 
 	const wantStored = "WG5d8oPm3OtcPnkdi4Uo7BkeZkBFzpcXkuLmtbsT4qY="
@@ -189,8 +189,8 @@ func TestVerifierRoundTrip(t *testing.T) {
 		t.Fatalf("new verifier: %v", err)
 	}
 	encoded := original.String()
-	if !IsVerifier(encoded) {
-		t.Errorf("IsVerifier(%q) = false", encoded)
+	if !strings.HasPrefix(encoded, Mechanism+"$") {
+		t.Errorf("encoded verifier %q does not name the mechanism", encoded)
 	}
 	if strings.Contains(encoded, "s3cret") {
 		t.Error("encoded verifier leaks the password")

@@ -118,27 +118,10 @@ func serialNumber(t *testing.T) *big.Int {
 	return serial
 }
 
-// startTLSServer starts a server on an ephemeral port serving the "test"
-// database over TLS.
+// startTLSServer serves the default databases over TLS.
 func startTLSServer(t *testing.T, tlsCfg server.TLSConfig, auth server.AuthConfig) string {
 	t.Helper()
-	cfg := &server.Config{
-		Listen: server.ListenConfig{Host: "127.0.0.1", Port: 0},
-		TLS:    tlsCfg,
-		Auth:   auth,
-		Databases: map[string]server.DatabaseConfig{
-			"test": {Path: filepath.Join(t.TempDir(), "test.sqlite3")},
-		},
-	}
-	srv := server.New(cfg)
-	if err := srv.Start(); err != nil {
-		t.Fatalf("start server: %v", err)
-	}
-	t.Cleanup(func() { srv.Close() })
-	if !srv.TLSEnabled() {
-		t.Fatal("server did not enable TLS")
-	}
-	return srv.Addr().String()
+	return serve(t, &server.Config{TLS: tlsCfg, Auth: auth})
 }
 
 // sslDSN builds a DSN with the given ssl_* parameters, escaping the file
@@ -317,8 +300,7 @@ func TestTLSWithPasswordAuth(t *testing.T) {
 	addr := startTLSServer(t,
 		server.TLSConfig{Cert: cert, Key: key},
 		server.AuthConfig{
-			Iterations: testIterations,
-			Users:      map[string]server.UserConfig{"alice": {Password: "s3cret"}},
+			Users: map[string]server.UserConfig{"alice": {Verifier: verifierFor(t, "s3cret")}},
 		})
 
 	params := url.Values{"ssl_ca": []string{ca.Chain}}

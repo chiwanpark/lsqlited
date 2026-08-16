@@ -8,6 +8,10 @@ import (
 	"github.com/chiwanpark/lsqlited/internal/auth"
 )
 
+// testVerifier is a syntactically valid credential, for the cases whose
+// subject is something other than the credential itself.
+const testVerifier = "SCRAM-SHA-256$4096:4X/1OevPJo0nxVmGMhochg==$hUeU8yswZ8nWH3GIkn1BAc5zwfLC7yDoOiDYnYSunAE=:aX9c/LVO0TcYRedgwLyvphjukETWWUwHn0uFJgprzew="
+
 func writeConfig(t *testing.T, content string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")
@@ -24,19 +28,9 @@ listen:
   port: 7890
 params: _journal_mode=WAL&cache=private
 databases:
-  app:
-    path: /tmp/app.sqlite3
-  metrics:
-    path: /tmp/metrics.sqlite3
-    params: _busy_timeout=10000
-  archive:
-    path: /tmp/archive.sqlite3
-    params: mode=ro&immutable=true
-  cached:
-    path: /tmp/cached.sqlite3
-    params:
-      cache: shared
-      _journal_mode: WAL
+  app: /tmp/app.sqlite3
+  metrics: /tmp/metrics.sqlite3
+  archive: /tmp/archive.sqlite3
 `)
 	cfg, err := LoadConfig(path)
 	if err != nil {
@@ -46,19 +40,20 @@ databases:
 		t.Errorf("unexpected listen config: %+v", cfg.Listen)
 	}
 	if cfg.Params["_journal_mode"] != "WAL" || cfg.Params["cache"] != "private" {
-		t.Errorf("unexpected global params: %+v", cfg.Params)
+		t.Errorf("unexpected params: %+v", cfg.Params)
 	}
-	if len(cfg.Databases) != 4 {
-		t.Fatalf("expected 4 databases, got %d", len(cfg.Databases))
+	want := map[string]string{
+		"app":     "/tmp/app.sqlite3",
+		"metrics": "/tmp/metrics.sqlite3",
+		"archive": "/tmp/archive.sqlite3",
 	}
-	if db := cfg.Databases["metrics"]; db.Params["_busy_timeout"] != "10000" {
-		t.Errorf("unexpected metrics config: %+v", db)
+	if len(cfg.Databases) != len(want) {
+		t.Fatalf("databases = %+v, want %+v", cfg.Databases, want)
 	}
-	if db := cfg.Databases["archive"]; db.Params["mode"] != "ro" || db.Params["immutable"] != "true" {
-		t.Errorf("unexpected archive params: %+v", db.Params)
-	}
-	if db := cfg.Databases["cached"]; db.Params["cache"] != "shared" || db.Params["_journal_mode"] != "WAL" {
-		t.Errorf("unexpected cached params: %+v", db.Params)
+	for name, path := range want {
+		if cfg.Databases[name] != path {
+			t.Errorf("databases.%s = %q, want %q", name, cfg.Databases[name], path)
+		}
 	}
 }
 
@@ -68,39 +63,24 @@ listen: {port: 7890}
 query_timeout: 60
 transaction_timeout: 30
 max_rows: 5000
-max_response_bytes: 1048576
 databases:
-  app:
-    path: /tmp/app.sqlite3
-  reports:
-    path: /tmp/reports.sqlite3
-    query_timeout: 90
-    transaction_timeout: 5
-    max_rows: 100
-    max_response_bytes: 4096
+  app: /tmp/app.sqlite3
 `)
 	cfg, err := LoadConfig(path)
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	want := Limits{QueryTimeout: 60, TransactionTimeout: 30, MaxRows: 5000, MaxResponseBytes: 1 << 20}
+	want := Limits{QueryTimeout: 60, TransactionTimeout: 30, MaxRows: 5000}
 	if cfg.Limits != want {
-		t.Errorf("server limits = %+v, want %+v", cfg.Limits, want)
-	}
-	if got := cfg.Databases["app"].Limits; got != (Limits{}) {
-		t.Errorf("app limits = %+v, want none", got)
-	}
-	wantDB := Limits{QueryTimeout: 90, TransactionTimeout: 5, MaxRows: 100, MaxResponseBytes: 4096}
-	if got := cfg.Databases["reports"].Limits; got != wantDB {
-		t.Errorf("reports limits = %+v, want %+v", got, wantDB)
+		t.Errorf("limits = %+v, want %+v", cfg.Limits, want)
 	}
 
 	// A configuration that says nothing about limits leaves statements
-	// unbounded, apart from the response size the protocol imposes anyway.
+	// unbounded, apart from the frame size the protocol imposes anyway.
 	silent := writeConfig(t, `
 listen: {port: 7890}
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `)
 	cfg, err = LoadConfig(silent)
 	if err != nil {
@@ -109,12 +89,8 @@ databases:
 	if cfg.Limits != (Limits{}) {
 		t.Errorf("limits = %+v, want none", cfg.Limits)
 	}
-	resolved := cfg.Limits.resolve(cfg.Databases["app"].Limits)
-	if resolved.timeout != 0 || resolved.maxRows != 0 || resolved.transactionTimeout != 0 {
-		t.Errorf("resolved limits = %+v, want unbounded time and rows", resolved)
-	}
-	if resolved.maxResponseBytes != DefaultMaxResponseBytes {
-		t.Errorf("maxResponseBytes = %d, want %d", resolved.maxResponseBytes, int64(DefaultMaxResponseBytes))
+	if resolved := cfg.Limits.resolve(); resolved != (statementLimits{}) {
+		t.Errorf("resolved limits = %+v, want unbounded", resolved)
 	}
 }
 
@@ -123,11 +99,7 @@ func TestLoadConfigMaxConnections(t *testing.T) {
 listen: {port: 7890}
 max_connections: 8
 databases:
-  app:
-    path: /tmp/app.sqlite3
-  reports:
-    path: /tmp/reports.sqlite3
-    max_connections: 2
+  app: /tmp/app.sqlite3
 `)
 	cfg, err := LoadConfig(path)
 	if err != nil {
@@ -136,56 +108,41 @@ databases:
 	if cfg.MaxConnections != 8 {
 		t.Errorf("max_connections = %d, want 8", cfg.MaxConnections)
 	}
-	// A database without one inherits the server's; its own wins.
-	app, ok := cfg.databaseConfig("app")
-	if !ok || app.MaxConnections != 8 {
-		t.Errorf("app max_connections = %d, want 8", app.MaxConnections)
-	}
-	reports, ok := cfg.databaseConfig("reports")
-	if !ok || reports.MaxConnections != 2 {
-		t.Errorf("reports max_connections = %d, want 2", reports.MaxConnections)
-	}
-	if _, ok := cfg.databaseConfig("nope"); ok {
-		t.Error("databaseConfig found a database that is not configured")
-	}
 
 	// Silence leaves the pool unbounded.
 	silent := writeConfig(t, `
 listen: {port: 7890}
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `)
 	cfg, err = LoadConfig(silent)
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if app, _ := cfg.databaseConfig("app"); app.MaxConnections != 0 {
-		t.Errorf("app max_connections = %d, want 0", app.MaxConnections)
+	if cfg.MaxConnections != 0 {
+		t.Errorf("max_connections = %d, want 0", cfg.MaxConnections)
 	}
 }
 
 func TestLoadConfigParamsScalarTypes(t *testing.T) {
 	path := writeConfig(t, `
 listen: {port: 7890}
+params:
+  immutable: true
+  _busy_timeout: 1000
 databases:
-  app:
-    path: /tmp/app.sqlite3
-    params:
-      immutable: true
-      _busy_timeout: 1000
+  app: /tmp/app.sqlite3
 `)
 	cfg, err := LoadConfig(path)
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	params := cfg.Databases["app"].Params
-	if params["immutable"] != "true" || params["_busy_timeout"] != "1000" {
-		t.Errorf("unexpected params: %+v", params)
+	if cfg.Params["immutable"] != "true" || cfg.Params["_busy_timeout"] != "1000" {
+		t.Errorf("unexpected params: %+v", cfg.Params)
 	}
 }
 
-// TestLoadConfigExtensions covers both spellings of an extension entry and
-// the way the global list combines with a per-database one.
+// TestLoadConfigExtensions covers both spellings of an extension entry.
 func TestLoadConfigExtensions(t *testing.T) {
 	path := writeConfig(t, `
 listen: {port: 7890}
@@ -194,14 +151,7 @@ extensions:
   - path: /usr/lib/sqlite3/misc.so
     entrypoint: sqlite3_misc_init
 databases:
-  app:
-    path: /tmp/app.sqlite3
-    extensions:
-      - /usr/lib/sqlite3/fts5.so
-      # Repeating a server-wide extension is a no-op, not a second load.
-      - /usr/lib/sqlite3/vector0.so
-  plain:
-    path: /tmp/plain.sqlite3
+  app: /tmp/app.sqlite3
 `)
 	cfg, err := LoadConfig(path)
 	if err != nil {
@@ -218,14 +168,6 @@ databases:
 		if cfg.Extensions[i] != want[i] {
 			t.Errorf("extensions[%d] = %v, want %v", i, cfg.Extensions[i], want[i])
 		}
-	}
-
-	merged := cfg.Extensions.merge(cfg.Databases["app"].Extensions)
-	if got := merged.strings(); len(got) != 3 || got[2] != "/usr/lib/sqlite3/fts5.so" {
-		t.Errorf("app extensions = %v, want the global ones followed by fts5", got)
-	}
-	if got := cfg.Extensions.merge(cfg.Databases["plain"].Extensions); len(got) != 2 {
-		t.Errorf("plain extensions = %v, want only the global ones", got)
 	}
 }
 
@@ -254,145 +196,117 @@ func TestLoadConfigInvalid(t *testing.T) {
 listen:
   host: 127.0.0.1
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `,
 		"port out of range": `
 listen: {port: 70000}
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `,
 		"no databases": `
 listen: {port: 7890}
 `,
-		"missing path": `
+		"empty path": `
 listen: {port: 7890}
 databases:
-  app: {params: "mode=ro"}
+  app: ""
+`,
+		"empty database name": `
+listen: {port: 7890}
+databases:
+  "": /tmp/app.sqlite3
+`,
+		"removed per-database options": `
+listen: {port: 7890}
+databases:
+  app:
+    path: /tmp/app.sqlite3
+    max_rows: 100
 `,
 		"unknown field": `
 listen: {port: 7890, bogus: true}
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `,
-		"removed read_only option": `
+		"unknown key": `
 listen: {port: 7890}
+max_response_bytes: 134217728
 databases:
-  app: {path: /tmp/app.sqlite3, read_only: true}
+  app: /tmp/app.sqlite3
 `,
-		"removed busy_timeout_ms option": `
-listen: {port: 7890}
-databases:
-  app: {path: /tmp/app.sqlite3, busy_timeout_ms: 10000}
-`,
-		"malformed global params": `
+		"malformed params": `
 listen: {port: 7890}
 params: "mode=%zz"
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
+`,
+		"params of wrong type": `
+listen: {port: 7890}
+params: [mode=ro]
+databases:
+  app: /tmp/app.sqlite3
+`,
+		"empty param name": `
+listen: {port: 7890}
+params:
+  "": ro
+databases:
+  app: /tmp/app.sqlite3
 `,
 		"query timeout with a unit": `
 listen: {port: 7890}
 query_timeout: 60s
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `,
 		"malformed query timeout": `
 listen: {port: 7890}
 query_timeout: soon
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `,
 		"negative query timeout": `
 listen: {port: 7890}
 query_timeout: -5
 databases:
-  app: {path: /tmp/app.sqlite3}
-`,
-		"negative max rows": `
-listen: {port: 7890}
-max_rows: -1
-databases:
-  app: {path: /tmp/app.sqlite3}
-`,
-		"response size beyond the frame limit": `
-listen: {port: 7890}
-max_response_bytes: 134217728
-databases:
-  app: {path: /tmp/app.sqlite3}
-`,
-		"negative database max rows": `
-listen: {port: 7890}
-databases:
-  app: {path: /tmp/app.sqlite3, max_rows: -1}
-`,
-		"negative max connections": `
-listen: {port: 7890}
-max_connections: -1
-databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `,
 		"negative transaction timeout": `
 listen: {port: 7890}
 transaction_timeout: -30
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `,
-		"negative database max connections": `
+		"negative max rows": `
 listen: {port: 7890}
+max_rows: -1
 databases:
-  app: {path: /tmp/app.sqlite3, max_connections: -4}
+  app: /tmp/app.sqlite3
 `,
-		"malformed database query timeout": `
+		"negative max connections": `
 listen: {port: 7890}
+max_connections: -1
 databases:
-  app: {path: /tmp/app.sqlite3, query_timeout: 30s}
-`,
-		"empty global param name": `
-listen: {port: 7890}
-params:
-  "": ro
-databases:
-  app: {path: /tmp/app.sqlite3}
-`,
-		"malformed params string": `
-listen: {port: 7890}
-databases:
-  app: {path: /tmp/app.sqlite3, params: "mode=%zz"}
-`,
-		"params of wrong type": `
-listen: {port: 7890}
-databases:
-  app:
-    path: /tmp/app.sqlite3
-    params: [mode=ro]
-`,
-		"empty param name": `
-listen: {port: 7890}
-databases:
-  app:
-    path: /tmp/app.sqlite3
-    params:
-      "": ro
+  app: /tmp/app.sqlite3
 `,
 		"empty extension path": `
 listen: {port: 7890}
 extensions: [""]
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `,
 		"extension mapping without a path": `
 listen: {port: 7890}
+extensions:
+  - entrypoint: sqlite3_misc_init
 databases:
-  app:
-    path: /tmp/app.sqlite3
-    extensions:
-      - entrypoint: sqlite3_misc_init
+  app: /tmp/app.sqlite3
 `,
 		"duplicate extension": `
 listen: {port: 7890}
 extensions: [/tmp/a.so, /tmp/a.so]
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `,
 		"unknown extension field": `
 listen: {port: 7890}
@@ -400,22 +314,21 @@ extensions:
   - path: /tmp/a.so
     entry_point: sqlite3_a_init
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `,
 		"extension of wrong type": `
 listen: {port: 7890}
+extensions:
+  - [/tmp/a.so]
 databases:
-  app:
-    path: /tmp/app.sqlite3
-    extensions:
-      - [/tmp/a.so]
+  app: /tmp/app.sqlite3
 `,
 		"extensions of wrong type": `
 listen: {port: 7890}
 extensions:
   vector: /tmp/a.so
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `,
 		"user without credentials": `
 listen: {port: 7890}
@@ -423,17 +336,15 @@ auth:
   users:
     alice: {}
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `,
-		"user with both credentials": `
+		"removed password option": `
 listen: {port: 7890}
 auth:
   users:
-    alice:
-      password: s3cret
-      verifier: "SCRAM-SHA-256$4096:c2FsdA==$a$b"
+    alice: {password: s3cret}
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `,
 		"malformed verifier": `
 listen: {port: 7890}
@@ -441,61 +352,61 @@ auth:
   users:
     alice: {verifier: "not-a-verifier"}
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `,
 		"empty user name": `
 listen: {port: 7890}
 auth:
   users:
-    "": {password: s3cret}
+    "": {verifier: "` + testVerifier + `"}
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `,
-		"iterations out of range": `
+		"removed auth iterations key": `
 listen: {port: 7890}
 auth:
-  iterations: 10
+  iterations: 4096
   users:
-    alice: {password: s3cret}
+    alice: {verifier: "` + testVerifier + `"}
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `,
 		"unknown auth field": `
 listen: {port: 7890}
 auth:
   bogus: true
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `,
 		"grant for unknown database": `
 listen: {port: 7890}
 auth:
   users:
     alice:
-      password: s3cret
+      verifier: "` + testVerifier + `"
       databases: [app, typo]
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `,
 		"duplicate grant": `
 listen: {port: 7890}
 auth:
   users:
     alice:
-      password: s3cret
+      verifier: "` + testVerifier + `"
       databases: [app, app]
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `,
 		"grants of wrong type": `
 listen: {port: 7890}
 auth:
   users:
     alice:
-      password: s3cret
+      verifier: "` + testVerifier + `"
       databases: app
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `,
 	}
 	for name, content := range cases {
@@ -507,45 +418,30 @@ databases:
 	}
 }
 
-func TestParamsMerge(t *testing.T) {
-	global := Params{"mode": "rwc", "cache": "shared"}
-	merged := global.merge(Params{"mode": "ro", "immutable": "true"})
-	if merged["mode"] != "ro" || merged["cache"] != "shared" || merged["immutable"] != "true" {
-		t.Errorf("unexpected merged params: %+v", merged)
-	}
-	if global["mode"] != "rwc" || len(global) != 2 {
-		t.Errorf("merge modified the receiver: %+v", global)
-	}
-	if merged := Params(nil).merge(nil); merged != nil {
-		t.Errorf("expected nil params, got %+v", merged)
-	}
-}
-
 func TestLoadConfigAuth(t *testing.T) {
-	verifier, err := auth.NewVerifier("from-verifier", auth.MinIterations)
+	alice, err := auth.NewVerifier("s3cret", auth.MinIterations)
+	if err != nil {
+		t.Fatalf("new verifier: %v", err)
+	}
+	bob, err := auth.NewVerifier("hunter2", auth.MinIterations)
 	if err != nil {
 		t.Fatalf("new verifier: %v", err)
 	}
 	path := writeConfig(t, `
 listen: {port: 7890}
 auth:
-  iterations: 2000
   users:
     alice:
-      password: s3cret
+      verifier: "`+alice.String()+`"
     bob:
-      verifier: "`+verifier.String()+`"
+      verifier: "`+bob.String()+`"
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `)
 	cfg, err := LoadConfig(path)
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if cfg.Auth.Iterations != 2000 {
-		t.Errorf("auth.iterations = %d, want 2000", cfg.Auth.Iterations)
-	}
-
 	accounts, err := cfg.Auth.Accounts()
 	if err != nil {
 		t.Fatalf("Accounts: %v", err)
@@ -553,53 +449,99 @@ databases:
 	if len(accounts) != 2 {
 		t.Fatalf("expected 2 accounts, got %d", len(accounts))
 	}
-	// The plaintext password is turned into a verifier using the configured
-	// iteration count and a fresh random salt.
-	alice := accounts["alice"].Verifier
-	if alice.Iterations != 2000 {
-		t.Errorf("alice iterations = %d, want 2000", alice.Iterations)
+	// A verifier is used verbatim, and still accepts the password it was
+	// derived from.
+	if got := accounts["alice"].Verifier.String(); got != alice.String() {
+		t.Errorf("alice credential = %s, want %s", got, alice)
 	}
-	if len(alice.Salt) != auth.SaltLen {
-		t.Errorf("alice salt length = %d, want %d", len(alice.Salt), auth.SaltLen)
-	}
+	stored := accounts["alice"].Verifier
 	msg := auth.AuthMessage("alice", make([]byte, auth.NonceLen), make([]byte, auth.NonceLen),
-		alice.Salt, alice.Iterations)
-	salted, err := auth.SaltPassword("s3cret", alice.Salt, alice.Iterations)
+		stored.Salt, stored.Iterations)
+	salted, err := auth.SaltPassword("s3cret", stored.Salt, stored.Iterations)
 	if err != nil {
 		t.Fatalf("salt password: %v", err)
 	}
-	if !alice.Verify(msg, auth.ClientProof(salted, msg)) {
-		t.Error("credential derived from a plaintext password does not accept it")
+	if !stored.Verify(msg, auth.ClientProof(salted, msg)) {
+		t.Error("configured verifier does not accept its own password")
 	}
-	// A precomputed verifier is used verbatim.
-	if got := accounts["bob"].Verifier.String(); got != verifier.String() {
-		t.Errorf("bob credential = %s, want %s", got, verifier)
+}
+
+// TestDecoyIterations checks that the count advertised to an unknown user is
+// the one real accounts use, so a fabricated challenge does not stand out.
+func TestDecoyIterations(t *testing.T) {
+	verifier := func(iterations int) *Account {
+		t.Helper()
+		v, err := auth.NewVerifier("s3cret", iterations)
+		if err != nil {
+			t.Fatalf("new verifier: %v", err)
+		}
+		return &Account{Verifier: v}
+	}
+	cases := []struct {
+		name     string
+		accounts map[string]*Account
+		want     int
+	}{
+		{
+			name: "no accounts fall back to the default",
+			want: auth.DefaultIterations,
+		},
+		{
+			name:     "a single account decides",
+			accounts: map[string]*Account{"a": verifier(2000)},
+			want:     2000,
+		},
+		{
+			name: "the majority decides",
+			accounts: map[string]*Account{
+				"a": verifier(2000), "b": verifier(2000), "c": verifier(3000),
+			},
+			want: 2000,
+		},
+		{
+			name: "a tie goes to the smaller count",
+			accounts: map[string]*Account{
+				"a": verifier(3000), "b": verifier(2000),
+			},
+			want: 2000,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := decoyIterations(tc.accounts); got != tc.want {
+				t.Errorf("decoyIterations() = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }
 
 // TestLoadConfigGrants covers the three shapes of the per-user database
 // list: omitted, explicit, and explicitly empty.
 func TestLoadConfigGrants(t *testing.T) {
+	v, err := auth.NewVerifier("s3cret", auth.MinIterations)
+	if err != nil {
+		t.Fatalf("new verifier: %v", err)
+	}
+	verifier := v.String()
 	path := writeConfig(t, `
 listen: {port: 7890}
 auth:
-  iterations: 1000
   users:
     root:
-      password: s3cret
+      verifier: "`+verifier+`"
     alice:
-      password: s3cret
+      verifier: "`+verifier+`"
       databases: [app, metrics]
     bob:
-      password: s3cret
+      verifier: "`+verifier+`"
       databases: [app]
     suspended:
-      password: s3cret
+      verifier: "`+verifier+`"
       databases: []
 databases:
-  app: {path: /tmp/app.sqlite3}
-  metrics: {path: /tmp/metrics.sqlite3}
-  archive: {path: /tmp/archive.sqlite3}
+  app: /tmp/app.sqlite3
+  metrics: /tmp/metrics.sqlite3
+  archive: /tmp/archive.sqlite3
 `)
 	cfg, err := LoadConfig(path)
 	if err != nil {
@@ -652,7 +594,7 @@ func TestLoadConfigWithoutAuth(t *testing.T) {
 	path := writeConfig(t, `
 listen: {port: 7890}
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `)
 	cfg, err := LoadConfig(path)
 	if err != nil {
@@ -681,10 +623,10 @@ func TestExampleConfig(t *testing.T) {
 		t.Error("the example config should show a working auth section")
 	}
 	if len(cfg.Extensions) == 0 {
-		t.Error("the example config should show global extensions")
+		t.Error("the example config should show extensions")
 	}
-	if len(cfg.Databases["archive"].Extensions) == 0 {
-		t.Error("the example config should show per-database extensions")
+	if len(cfg.Databases) == 0 {
+		t.Error("the example config should show databases")
 	}
 }
 

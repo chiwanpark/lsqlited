@@ -15,7 +15,8 @@ import (
 const MinVersion = tls.VersionTLS12
 
 // ParseVersion maps a configuration string such as "1.3" to the matching
-// crypto/tls version constant. An empty string selects MinVersion.
+// crypto/tls constant, accepting the common spellings ("TLSv1.2" and so on).
+// An empty string selects MinVersion.
 func ParseVersion(s string) (uint16, error) {
 	switch normalizeVersion(s) {
 	case "":
@@ -29,8 +30,6 @@ func ParseVersion(s string) (uint16, error) {
 	}
 }
 
-// normalizeVersion accepts the common spellings of a TLS version, so that
-// "1.2", "TLS1.2", and "TLSv1.2" all name the same thing.
 func normalizeVersion(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	s = strings.TrimPrefix(s, "tls")
@@ -55,9 +54,7 @@ func LoadCertPool(path string) (*x509.CertPool, error) {
 
 // VerifyChain returns a tls.Config.VerifyConnection callback that checks the
 // peer chain against roots (the system pool when nil) without checking the
-// host name. It is what separates "verify-ca" from "verify-full": the
-// certificate must be issued by a trusted CA, but it need not name the host
-// the client happened to dial.
+// host name. It is what separates "verify-ca" from "verify-full".
 func VerifyChain(roots *x509.CertPool) func(tls.ConnectionState) error {
 	return func(state tls.ConnectionState) error {
 		if len(state.PeerCertificates) == 0 {

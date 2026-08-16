@@ -82,7 +82,7 @@ tls:
   client_ca: /etc/lsqlited/clients.crt
   min_version: "1.3"
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `)
 	cfg, err := LoadConfig(path)
 	if err != nil {
@@ -108,25 +108,25 @@ func TestLoadConfigTLSInvalid(t *testing.T) {
 listen: {port: 7890}
 tls: {key: /etc/lsqlited/server.key}
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `,
 		"client ca alone": `
 listen: {port: 7890}
 tls: {client_ca: /etc/lsqlited/clients.crt}
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `,
 		"bad min version": `
 listen: {port: 7890}
 tls: {cert: /c.pem, key: /k.pem, min_version: "1.1"}
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `,
 		"unknown tls field": `
 listen: {port: 7890}
 tls: {cert: /c.pem, key: /k.pem, verify: true}
 databases:
-  app: {path: /tmp/app.sqlite3}
+  app: /tmp/app.sqlite3
 `,
 	}
 	for name, content := range cases {
@@ -145,7 +145,7 @@ func TestWithTLSConfigOverridesFile(t *testing.T) {
 	srv := New(&Config{
 		Listen:    ListenConfig{Port: 7890},
 		TLS:       TLSConfig{Cert: "/nonexistent/server.crt", Key: "/nonexistent/server.key"},
-		Databases: map[string]DatabaseConfig{"app": {Path: "/tmp/app.sqlite3"}},
+		Databases: map[string]string{"app": "/tmp/app.sqlite3"},
 	}, WithTLSConfig(supplied))
 	// initTLS must leave the supplied config alone rather than trying to
 	// read the (missing) files named in the configuration.

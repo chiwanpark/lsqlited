@@ -1,9 +1,7 @@
 package server
 
 import (
-	"context"
 	"database/sql"
-	"path/filepath"
 	"testing"
 
 	"github.com/chiwanpark/lsqlited/internal/version"
@@ -23,14 +21,10 @@ func versionOf(t *testing.T, db *sql.DB) string {
 // on every database the daemon opens, whether or not it loads extensions,
 // since the two go through different drivers.
 func TestOpenSQLiteRegistersVersion(t *testing.T) {
-	want, err := version.Query(context.Background())
-	if err != nil {
-		t.Fatalf("version.Query: %v", err)
-	}
+	want := version.String()
 
 	t.Run("without extensions", func(t *testing.T) {
-		cfg := DatabaseConfig{Path: filepath.Join(t.TempDir(), "app.sqlite3")}
-		db, err := openSQLite(cfg, nil, nil)
+		db, err := openSQLite(testPath(t), &Config{})
 		if err != nil {
 			t.Fatalf("openSQLite: %v", err)
 		}
@@ -45,11 +39,7 @@ func TestOpenSQLiteRegistersVersion(t *testing.T) {
 	// connect hook also has to register the function.
 	t.Run("with extensions", func(t *testing.T) {
 		lib := buildExtension(t, "sqlite3_extension_init", "lsqlited_answer", 42)
-		cfg := DatabaseConfig{
-			Path:       filepath.Join(t.TempDir(), "app.sqlite3"),
-			Extensions: Extensions{{Path: lib}},
-		}
-		db, err := openSQLite(cfg, nil, nil)
+		db, err := openSQLite(testPath(t), &Config{Extensions: Extensions{{Path: lib}}})
 		if err != nil {
 			t.Fatalf("openSQLite: %v", err)
 		}
@@ -68,11 +58,9 @@ func TestOpenSQLiteRegistersVersion(t *testing.T) {
 	// A named entry point takes the other branch of the connect hook.
 	t.Run("with a named entrypoint", func(t *testing.T) {
 		lib := buildExtension(t, "lsqlited_test_init", "lsqlited_answer", 7)
-		cfg := DatabaseConfig{
-			Path:       filepath.Join(t.TempDir(), "app.sqlite3"),
+		db, err := openSQLite(testPath(t), &Config{
 			Extensions: Extensions{{Path: lib, Entrypoint: "lsqlited_test_init"}},
-		}
-		db, err := openSQLite(cfg, nil, nil)
+		})
 		if err != nil {
 			t.Fatalf("openSQLite: %v", err)
 		}

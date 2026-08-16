@@ -11,9 +11,6 @@ import (
 	"testing"
 )
 
-// extensionSource is a minimal loadable extension registering a scalar
-// function that returns a constant, which is enough to tell whether the
-// server loaded it into a connection.
 const extensionSource = `
 #include <sqlite3ext.h>
 SQLITE_EXTENSION_INIT1
@@ -28,10 +25,6 @@ int %s(sqlite3 *db, char **err, const sqlite3_api_routines *api) {
 }
 `
 
-// buildExtension compiles a loadable extension exporting entrypoint and a
-// SQL function of the given name returning answer. The test is skipped when
-// the machine cannot build one, since neither a C compiler nor the SQLite
-// development headers are guaranteed to be present.
 func buildExtension(t *testing.T, entrypoint, function string, answer int) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -87,11 +80,7 @@ func TestOpenSQLiteLoadsExtension(t *testing.T) {
 			if tc.entrypoint != "sqlite3_extension_init" {
 				ext.Entrypoint = tc.entrypoint
 			}
-			cfg := DatabaseConfig{
-				Path:       filepath.Join(t.TempDir(), "app.sqlite3"),
-				Extensions: Extensions{ext},
-			}
-			db, err := openSQLite(cfg, nil, nil)
+			db, err := openSQLite(testPath(t), &Config{Extensions: Extensions{ext}})
 			if err != nil {
 				t.Fatalf("openSQLite: %v", err)
 			}
@@ -103,41 +92,35 @@ func TestOpenSQLiteLoadsExtension(t *testing.T) {
 	}
 }
 
-// TestOpenSQLiteLoadsGlobalExtension checks that a server-wide extension
-// reaches a database that declares one of its own, and that a database
-// without extensions still gets the global one.
-func TestOpenSQLiteLoadsGlobalExtension(t *testing.T) {
-	global := buildExtension(t, "sqlite3_extension_init", "lsqlited_global", 1)
-	local := buildExtension(t, "lsqlited_local_init", "lsqlited_local", 2)
+// TestOpenSQLiteLoadsEveryExtension checks that all the configured extensions
+// reach a database, whether or not they name an entry point.
+func TestOpenSQLiteLoadsEveryExtension(t *testing.T) {
+	first := buildExtension(t, "sqlite3_extension_init", "lsqlited_first", 1)
+	second := buildExtension(t, "lsqlited_second_init", "lsqlited_second", 2)
 
-	globals := Extensions{{Path: global}}
-	cfg := DatabaseConfig{
-		Path:       filepath.Join(t.TempDir(), "app.sqlite3"),
-		Extensions: Extensions{{Path: local, Entrypoint: "lsqlited_local_init"}},
-	}
-	db, err := openSQLite(cfg, nil, globals)
+	db, err := openSQLite(testPath(t), &Config{Extensions: Extensions{
+		{Path: first},
+		{Path: second, Entrypoint: "lsqlited_second_init"},
+	}})
 	if err != nil {
 		t.Fatalf("openSQLite: %v", err)
 	}
 	defer db.Close()
-	if got := answerOf(t, db, "lsqlited_global"); got != 1 {
-		t.Errorf("lsqlited_global() = %d, want 1", got)
+	if got := answerOf(t, db, "lsqlited_first"); got != 1 {
+		t.Errorf("lsqlited_first() = %d, want 1", got)
 	}
-	if got := answerOf(t, db, "lsqlited_local"); got != 2 {
-		t.Errorf("lsqlited_local() = %d, want 2", got)
+	if got := answerOf(t, db, "lsqlited_second"); got != 2 {
+		t.Errorf("lsqlited_second() = %d, want 2", got)
 	}
 
-	plain := DatabaseConfig{Path: filepath.Join(t.TempDir(), "other.sqlite3")}
-	other, err := openSQLite(plain, nil, globals)
+	// A database served by a daemon that configures no extension gets none.
+	other, err := openSQLite(testPath(t), &Config{})
 	if err != nil {
-		t.Fatalf("openSQLite without database extensions: %v", err)
+		t.Fatalf("openSQLite without extensions: %v", err)
 	}
 	defer other.Close()
-	if got := answerOf(t, other, "lsqlited_global"); got != 1 {
-		t.Errorf("lsqlited_global() = %d, want 1", got)
-	}
-	if _, err := other.Query("SELECT lsqlited_local()"); err == nil {
-		t.Error("a per-database extension leaked into another database")
+	if _, err := other.Query("SELECT lsqlited_first()"); err == nil {
+		t.Error("an extension leaked into a database configured without one")
 	}
 }
 
@@ -149,14 +132,12 @@ func TestServerRegistersExtensions(t *testing.T) {
 	local := buildExtension(t, "lsqlited_srv_init", "lsqlited_srv_local", 8)
 
 	srv := New(&Config{
-		Listen:     ListenConfig{Host: "127.0.0.1", Port: 0},
-		Extensions: Extensions{{Path: global}},
-		Databases: map[string]DatabaseConfig{
-			"app": {
-				Path:       filepath.Join(t.TempDir(), "app.sqlite3"),
-				Extensions: Extensions{{Path: local, Entrypoint: "lsqlited_srv_init"}},
-			},
+		Listen: ListenConfig{Host: "127.0.0.1", Port: 0},
+		Extensions: Extensions{
+			{Path: global},
+			{Path: local, Entrypoint: "lsqlited_srv_init"},
 		},
+		Databases: map[string]string{"app": testPath(t)},
 	})
 	defer srv.Close()
 
@@ -182,11 +163,7 @@ func TestOpenSQLiteExtensionError(t *testing.T) {
 	}
 	for name, exts := range cases {
 		t.Run(name, func(t *testing.T) {
-			cfg := DatabaseConfig{
-				Path:       filepath.Join(t.TempDir(), "app.sqlite3"),
-				Extensions: exts,
-			}
-			db, err := openSQLite(cfg, nil, nil)
+			db, err := openSQLite(testPath(t), &Config{Extensions: exts})
 			if err == nil {
 				db.Close()
 				t.Fatal("expected an error for an unloadable extension")
@@ -227,36 +204,6 @@ func TestSQLiteDriver(t *testing.T) {
 		}
 	}
 	t.Errorf("driver %q was not registered with database/sql", first)
-}
-
-func TestExtensionsMerge(t *testing.T) {
-	global := Extensions{{Path: "/tmp/a.so"}, {Path: "/tmp/b.so", Entrypoint: "sqlite3_b_init"}}
-	merged := global.merge(Extensions{{Path: "/tmp/a.so"}, {Path: "/tmp/c.so"}})
-	want := Extensions{
-		{Path: "/tmp/a.so"},
-		{Path: "/tmp/b.so", Entrypoint: "sqlite3_b_init"},
-		{Path: "/tmp/c.so"},
-	}
-	if len(merged) != len(want) {
-		t.Fatalf("merged = %v, want %v", merged, want)
-	}
-	for i := range want {
-		if merged[i] != want[i] {
-			t.Errorf("merged[%d] = %v, want %v", i, merged[i], want[i])
-		}
-	}
-	if len(global) != 2 {
-		t.Errorf("merge modified the receiver: %v", global)
-	}
-	if merged := Extensions(nil).merge(nil); merged != nil {
-		t.Errorf("expected nil extensions, got %v", merged)
-	}
-	// The same path loaded through a different entry point is a distinct
-	// extension, so it survives the deduplication.
-	both := Extensions{{Path: "/tmp/a.so"}}.merge(Extensions{{Path: "/tmp/a.so", Entrypoint: "x"}})
-	if len(both) != 2 {
-		t.Errorf("merged = %v, want both entries", both)
-	}
 }
 
 func TestExtensionsDefaultEntrypoints(t *testing.T) {

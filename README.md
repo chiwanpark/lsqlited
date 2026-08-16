@@ -34,19 +34,9 @@ extensions:               # loadable extensions for every database
 - /usr/lib/sqlite3/vector0.so
 
 databases:
-  app:
-    path: /var/lib/lsqlited/app.sqlite3
-  metrics:
-    path: /var/lib/lsqlited/metrics.sqlite3
-    params: _busy_timeout=10000 # busy timeout in ms (default: 5000)
-  archive:
-    path: /var/lib/lsqlited/archive.sqlite3
-    params: mode=ro&immutable=true # read-only, never written to
-  cached:
-    path: /var/lib/lsqlited/cached.sqlite3
-    params:                # the mapping form works too
-      cache: shared
-      _synchronous: NORMAL
+  app: /var/lib/lsqlited/app.sqlite3
+  metrics: /var/lib/lsqlited/metrics.sqlite3
+  archive: /var/lib/lsqlited/archive.sqlite3
 ```
 
 Then start the daemon:
@@ -55,11 +45,11 @@ Then start the daemon:
 lsqlited -config /etc/lsqlited/config.yaml
 ```
 
-Each entry under `databases` maps a logical database name to a SQLite file. Database files are opened lazily on first use and shared across client connections. The daemon shuts down gracefully on `SIGINT`/`SIGTERM`.
+Each entry under `databases` maps a logical database name to a SQLite file. Every database is opened the same way, from the settings above — there are no per-database overrides. Files are opened lazily on first use and shared across client connections. The daemon shuts down gracefully on `SIGINT`/`SIGTERM`.
 
 ### Open Parameters
 
-SQLite open parameters can be set server-wide with the top-level `params` key and per database with `databases.<name>.params`. Both accept either a query string or a mapping:
+SQLite open parameters are set with the top-level `params` key, which accepts either a query string or a mapping:
 
 ```yaml
 params: _journal_mode=WAL&_foreign_keys=true
@@ -70,31 +60,26 @@ params:
   _foreign_keys: true
 ```
 
-Parameters are appended to the `file:` URI handed to SQLite, so anything the [go-sqlite3 driver](https://pkg.go.dev/github.com/mattn/go-sqlite3#hdr-Connection_String) understands works — `mode`, `immutable`, `cache`, `vfs`, `_journal_mode`, `_foreign_keys`, `_txlock`, and so on.
+Parameters are appended to the `file:` URI handed to SQLite, so anything the [go-sqlite3 driver](https://pkg.go.dev/github.com/mattn/go-sqlite3#hdr-Connection_String) understands works — `mode`, `immutable`, `cache`, `vfs`, `_journal_mode`, `_foreign_keys`, `_txlock`, and so on. They apply to every database, so `mode=ro` serves the whole daemon read-only; to serve one file read-only and another writable, run a second daemon.
 
 ### Limits
 
-A daemon shared by several clients needs a way to stop one statement from taking the whole process with it. Three keys bound what a single statement may do; each can be set at the top level, applying to every database, and under `databases.<name>`, applying to one:
+A daemon shared by several clients needs a way to stop one statement from taking the whole process with it. Three keys bound what a single statement may do, for every database it serves:
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `query_timeout` | integer (seconds) | unset (unlimited) | Upper bound on how long a statement may run |
 | `transaction_timeout` | integer (seconds) | unset (unlimited) | How long a transaction may sit idle before it is rolled back |
 | `max_rows` | integer | unset (unlimited) | Upper bound on the rows in one result |
-| `max_response_bytes` | integer | 64 MiB | Upper bound on an encoded response body |
+
+A result too large to fit in one protocol frame (64 MiB) is refused with `ErrResponseTooLarge`, whatever these say.
 
 ```yaml
 query_timeout: 60       # seconds
 max_rows: 5000
-
-databases:
-  app:
-    path: /var/lib/lsqlited/app.sqlite3
-  reports:
-    path: /var/lib/lsqlited/reports.sqlite3
-    query_timeout: 300  # reports may run longer
-    max_rows: 1000      # but must return less
 ```
+
+A client may ask for a tighter bound than these, with the `query_timeout` and `max_rows` DSN parameters or a context deadline, but never for a looser one.
 
 ```go
 switch {
@@ -107,16 +92,10 @@ case errors.Is(err, lsqlited.ErrTooManyRows), errors.Is(err, lsqlited.ErrRespons
 
 ### Connections
 
-Statements on one database run in parallel, each on its own SQLite connection: readers never block one another, and only writers take turns. `max_connections` bounds that pool, at the top level or under `databases.<name>`:
+Statements on one database run in parallel, each on its own SQLite connection: readers never block one another, and only writers take turns. `max_connections` bounds that pool:
 
 ```yaml
 max_connections: 16       # per database, for every database
-
-databases:
-  archive:
-    path: /var/lib/lsqlited/archive.sqlite3
-    params: mode=ro&immutable=true
-    max_connections: 32   # nothing writes here, so let readers have the machine
 ```
 
 Omitted, the pool is unbounded. Either way the daemon keeps as many connections warm as the bound allows — a core's worth when there is none — because opening one reopens the file, reparses the schema and reloads every extension.
@@ -144,25 +123,18 @@ if errors.Is(err, lsqlited.ErrBusy) {
 
 ### Extensions
 
-External SQLite extensions are listed with the top-level `extensions` key, which applies to every database, and with `databases.<name>.extensions`, which applies to one. The daemon loads them into every connection it opens to that database, so the functions, collations, and virtual tables they provide are available to all clients:
+External SQLite extensions are listed with the top-level `extensions` key. The daemon loads them into every connection it opens to every database, so the functions, collations, and virtual tables they provide are available to all clients:
 
 ```yaml
 extensions:
 - /usr/lib/sqlite3/vector0.so           # entry point left to SQLite
 - path: /usr/lib/sqlite3/misc.so        # explicit initialization symbol
   entrypoint: sqlite3_misc_init
-
-databases:
-  archive:
-    path: /var/lib/lsqlited/archive.sqlite3
-    extensions:                           # loaded for this database only
-    - path: /usr/lib/sqlite3/spellfix.so
-      entrypoint: sqlite3_spellfix_init
 ```
 
 An entry is either the path of a shared library or a mapping with `path` and an optional `entrypoint`. Without `entrypoint`, SQLite picks the initialization symbol itself: `sqlite3_extension_init`, falling back to a name derived from the file name (`spellfix.so` → `sqlite3_spellfix_init`). Paths are resolved by the platform's dynamic loader, so a bare file name is looked up along the usual search path.
 
-A database loads the global extensions first, then its own, except that entries without an `entrypoint` are loaded before those with one; repeating a global extension under a database is a no-op. A library that cannot be loaded fails the database at open time, and the error names it.
+Entries without an `entrypoint` are loaded before those with one. A library that cannot be loaded fails the database at open time, and the error names it.
 
 Extensions are not part of the wire protocol: clients cannot ask for one, and `load_extension()` remains unavailable in queries. They run in the daemon's process with its privileges, so load only libraries you trust.
 
@@ -198,28 +170,26 @@ By default the daemon accepts every connection. Adding an `auth.users` section t
 
 ```yaml
 auth:
-  iterations: 4096   # PBKDF2 cost, optional (default 4096)
   users:
     alice:
       verifier: "SCRAM-SHA-256$4096:4X/1Oev...==$hUeU8ys...=:aX9c/LV...="
       databases: [app, metrics]
     bob:
-      password: hunter2
+      verifier: "SCRAM-SHA-256$4096:1fDfTNq...==$gELeGJ1...=:9fli77X...="
       databases: [archive]
     admin:
-      password: letmein   # no `databases` key: every database
+      verifier: "SCRAM-SHA-256$4096:zWGk/XH...==$9/iVbds...=:q8XsJEH...="
+      # no `databases` key: every database
 ```
 
-Each account is configured with exactly one of:
+An account is configured with a `verifier` and nothing else, so the password never appears in the configuration file. Generate one with `-hash-password`:
 
-- `verifier` — a precomputed credential, so the password never appears in the configuration file. **Recommended.** Generate one with `-hash-password`:
+```sh
+printf '%s' 'hunter2' | lsqlited -hash-password
+SCRAM-SHA-256$4096:4X/1Oev...==$hUeU8ys...=:aX9c/LV...=
+```
 
-  ```sh
-  printf '%s' 'hunter2' | lsqlited -hash-password
-  SCRAM-SHA-256$4096:4X/1Oev...==$hUeU8ys...=:aX9c/LV...=
-  ```
-
-- `password` — a plaintext password, converted to a verifier when the configuration is loaded. Convenient, but readable by anyone who can read the file.
+The PBKDF2 cost is chosen there, with `-iterations`, and the verifier carries it — there is nothing to keep in sync in the configuration file. Clients run the derivation once per connection, so a large count makes connecting measurably slower.
 
 Clients then supply credentials in the DSN:
 
@@ -227,7 +197,7 @@ Clients then supply credentials in the DSN:
 db, err := sql.Open("lsqlited", "lsqlited://alice:s3cret@127.0.0.1:7890/app")
 ```
 
-Unauthenticated requests to a server with configured users are refused with `authentication required`, and a bad user name or password is refused with a deliberately vague `authentication failed`.
+Unauthenticated requests to a server with configured users are refused with `authentication required`, and a bad user name or password is refused with a deliberately vague `authentication failed`. An unknown user still gets a challenge, fabricated to look like a real one, so the handshake cannot be used to tell which accounts exist.
 
 Flags:
 
@@ -371,9 +341,10 @@ When the server has authentication enabled, a session must complete the `auth_in
 
 ## Limitations
 
-- Query results are fully buffered in memory before being sent, so very large result sets are subject to `max_response_bytes` and, above it, the 64 MiB message limit.
+- Query results are fully buffered in memory before being sent, so a result larger than the 64 MiB message limit is refused rather than streamed. Use `max_rows`, or paginate, to stay under it.
 - Limits bound one statement at a time; how many run at once is bounded only by `max_connections`.
-- Access control is per database, not per table or per statement: an account that may reach a database may read and write all of it. Use `params: mode=ro` to serve a database read-only to everyone.
+- Access control is per database, not per table or per statement: an account that may reach a database may read and write all of it.
+- Every database a daemon serves is opened the same way, with the same parameters, limits, pool size and extensions. Serving one database differently means running a second daemon.
 - Extensions are loaded from the configuration file only, and a change to the list takes effect when the daemon restarts.
 - Named query parameters and custom transaction isolation levels are not supported.
 

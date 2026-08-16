@@ -8,45 +8,31 @@ import (
 )
 
 // TLSConfig configures transport security for the listener. Leaving the
-// section out serves the wire protocol over plaintext TCP, which is the
-// default and only appropriate on a trusted network.
-//
-//	tls:
-//	  cert: /etc/lsqlited/server.crt
-//	  key: /etc/lsqlited/server.key
-//	  client_ca: /etc/lsqlited/clients-ca.crt
-//	  min_version: "1.2"
+// section out serves the wire protocol over plaintext TCP.
 type TLSConfig struct {
-	// Cert is the path to a PEM-encoded certificate. If the certificate is
-	// signed by an intermediate CA, append the intermediates to the file so
-	// that clients can build the chain.
+	// Cert is a PEM certificate, with any intermediates appended so that
+	// clients can build the chain. Key is the matching private key.
 	Cert string `yaml:"cert"`
-	// Key is the path to the PEM-encoded private key matching Cert.
-	Key string `yaml:"key"`
-	// ClientCA is the path to a PEM bundle of certificate authorities used
-	// to verify client certificates. Setting it turns on mutual TLS: a
-	// client that presents no certificate, or one signed by another CA, is
-	// rejected during the handshake. Note that this authenticates the
-	// connection, not the account; password authentication is configured
-	// separately under `auth`.
+	Key  string `yaml:"key"`
+	// ClientCA is a PEM bundle of authorities allowed to sign client
+	// certificates. Setting it turns on mutual TLS, which authenticates the
+	// connection, not the account; accounts are configured under `auth`.
 	ClientCA string `yaml:"client_ca"`
-	// MinVersion is the lowest TLS version to negotiate, "1.2" (the
-	// default) or "1.3".
+	// MinVersion is the lowest TLS version to negotiate, "1.2" (default) or
+	// "1.3".
 	MinVersion string `yaml:"min_version"`
 }
 
 // Enabled reports whether the listener should speak TLS.
 func (t TLSConfig) Enabled() bool { return t.Cert != "" || t.Key != "" }
 
-// configured reports whether any field of the section was set, which is what
-// distinguishes an omitted section from a half-filled one.
+// configured distinguishes an omitted section from a half-filled one.
 func (t TLSConfig) configured() bool {
 	return t.Enabled() || t.ClientCA != "" || t.MinVersion != ""
 }
 
-// validate checks the shape of the section. The certificate files
-// themselves are read by Server.Start, not here, so that Validate stays free
-// of I/O just like the database paths it does not stat either.
+// validate checks the shape of the section. The certificate files are read by
+// Server.Start, not here, so that Validate stays free of I/O.
 func (t TLSConfig) validate() error {
 	if !t.configured() {
 		return nil
