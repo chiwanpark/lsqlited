@@ -3,42 +3,29 @@ name: Release
 on:
   push:
     branches:
-    # One branch per HeadVer release line: releases/v1 publishes
-    # 1.<yearweek>.<build>. The branch name is the only place a release line
-    # is declared, so starting v2 takes a branch and nothing else.
     - releases/v*
 
-# The moving :<head> tag is rewritten on every run, so two pushes in quick
-# succession must not race for it.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
-  # cgo rules out cross-compiling, so any architecture the runner does not
-  # have is built under QEMU, which compiles the SQLite amalgamation at a
-  # crawl. Add linux/arm64 here once you are willing to wait for it.
-  PLATFORMS: linux/amd64
 
 jobs:
-  image:
-    name: Build and push image
+  version:
+    name: Compose the version
     runs-on: ubuntu-latest
-    permissions:
-      contents: read  # check out the source
-      packages: write # push to the container registry
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      head: ${{ steps.version.outputs.head }}
+      image: ${{ steps.version.outputs.image }}
     steps:
-    - name: Check out repository
-      uses: actions/checkout@v6
-
     - name: Compose the HeadVer version
       id: version
       run: |
         set -euo pipefail
 
-        # releases/v1 -> 1. The trigger also matches names like releases/vone,
-        # which would produce a version no registry or human could order.
         head="${GITHUB_REF_NAME#releases/v}"
         case "${head}" in
           '' | *[!0-9]*)
@@ -47,12 +34,7 @@ jobs:
             ;;
         esac
 
-        # {head}.{yearweek}.{build}. %G%V is the ISO 8601 year and week, which
-        # is what the ISOWeek() fallback inside the binary uses; %y%V would
-        # disagree with it in the last days of December.
         version="${head}.$(date -u +%G%V | cut -c3-).${GITHUB_RUN_NUMBER}"
-
-        # Registries reject upper case, which an owner or repository may have.
         image="${REGISTRY}/$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
 
         {
@@ -63,9 +45,24 @@ jobs:
 
         echo "Publishing \`${image}:${version}\`" >> "${GITHUB_STEP_SUMMARY}"
 
-    - name: Set up QEMU
-      # Only has an effect when PLATFORMS names a foreign architecture.
-      uses: docker/setup-qemu-action@v4
+  build:
+    name: Build linux/${{ matrix.arch }}
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - arch: amd64
+          runner: ubuntu-latest
+        - arch: arm64
+          runner: ubuntu-24.04-arm
+    steps:
+    - name: Check out repository
+      uses: actions/checkout@v6
 
     - name: Set up Buildx
       uses: docker/setup-buildx-action@v4
@@ -77,45 +74,94 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Build and push
+    - name: Build and push linux/${{ matrix.arch }}
       uses: docker/build-push-action@v7
       with:
         context: .
-        platforms: ${{ env.PLATFORMS }}
+        platforms: linux/${{ matrix.arch }}
         push: true
+        tags: ${{ needs.version.outputs.image }}:${{ needs.version.outputs.version }}-${{ matrix.arch }}
         build-args: |
-          VERSION=${{ steps.version.outputs.version }}
-        # The exact version, plus a moving tag for the release line. There is
-        # deliberately no :latest: with more than one release line it would
-        # mean whichever line happened to build last.
-        tags: |
-          ${{ steps.version.outputs.image }}:${{ steps.version.outputs.version }}
-          ${{ steps.version.outputs.image }}:${{ steps.version.outputs.head }}
+          VERSION=${{ needs.version.outputs.version }}
         labels: |
           org.opencontainers.image.title=lsqlited
           org.opencontainers.image.description=Lightweight daemon serving SQLite databases over TCP
-          org.opencontainers.image.version=${{ steps.version.outputs.version }}
+          org.opencontainers.image.version=${{ needs.version.outputs.version }}
           org.opencontainers.image.revision=${{ github.sha }}
           org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           org.opencontainers.image.licenses=MIT
-        # Compiling SQLite through cgo dominates the build, so it is worth
-        # caching; a cache that misbehaves must not fail a release, though.
-        cache-from: type=gha
-        cache-to: type=gha,mode=max,ignore-error=true
+        provenance: false
+        sbom: false
+        cache-from: type=gha,scope=${{ matrix.arch }}
+        cache-to: type=gha,mode=max,ignore-error=true,scope=${{ matrix.arch }}
 
-    - name: Verify the published image
+    - name: Verify the linux/${{ matrix.arch }} image
       env:
-        IMAGE: ${{ steps.version.outputs.image }}:${{ steps.version.outputs.version }}
-        WANT: ${{ steps.version.outputs.version }}
+        IMAGE: ${{ needs.version.outputs.image }}:${{ needs.version.outputs.version }}-${{ matrix.arch }}
+        WANT: ${{ needs.version.outputs.version }}
       run: |
         set -euo pipefail
 
-        # The tag is only trustworthy if the binary inside agrees with it, and
-        # the binary answers from lsqlited_version(), the same function
-        # clients call.
         got="$(docker run --rm "${IMAGE}" -version)"
         if [ "${got}" != "${WANT}" ]; then
           echo "::error::${IMAGE} reports version ${got}"
           exit 1
         fi
-        echo "\`${IMAGE}\` reports \`${got}\`" >> "${GITHUB_STEP_SUMMARY}"
+
+  manifest:
+    name: Publish the manifest list
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+    - name: Set up Buildx
+      uses: docker/setup-buildx-action@v4
+
+    - name: Log in to ${{ env.REGISTRY }}
+      uses: docker/login-action@v4
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Create the manifest list
+      env:
+        IMAGE: ${{ needs.version.outputs.image }}
+        VERSION: ${{ needs.version.outputs.version }}
+        HEAD: ${{ needs.version.outputs.head }}
+      run: |
+        set -euo pipefail
+
+        docker buildx imagetools create \
+          --tag "${IMAGE}:${VERSION}" \
+          --tag "${IMAGE}:${HEAD}" \
+          "${IMAGE}:${VERSION}-amd64" \
+          "${IMAGE}:${VERSION}-arm64"
+
+    - name: Verify the manifest list
+      env:
+        IMAGE: ${{ needs.version.outputs.image }}
+        VERSION: ${{ needs.version.outputs.version }}
+      run: |
+        set -euo pipefail
+
+        platforms="$(docker buildx imagetools inspect --raw "${IMAGE}:${VERSION}" |
+          jq -r '.manifests[].platform | .os + "/" + .architecture' | sort | tr '\n' ' ')"
+        for want in linux/amd64 linux/arm64; do
+          case " ${platforms} " in
+            *" ${want} "*) ;;
+            *)
+              echo "::error::${IMAGE}:${VERSION} covers ${platforms}, without ${want}"
+              exit 1
+              ;;
+          esac
+        done
+
+        got="$(docker run --rm "${IMAGE}:${VERSION}" -version)"
+        if [ "${got}" != "${VERSION}" ]; then
+          echo "::error::${IMAGE}:${VERSION} reports version ${got}"
+          exit 1
+        fi
+
+        echo "\`${IMAGE}:${VERSION}\` covers ${platforms}and reports \`${got}\`" >> "${GITHUB_STEP_SUMMARY}"
