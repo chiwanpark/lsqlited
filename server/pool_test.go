@@ -2,56 +2,99 @@ package server
 
 import (
 	"database/sql"
+	"errors"
 	"path/filepath"
-	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/chiwanpark/lsqlited/internal/version"
+	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
-// busy is a statement that spends a fixed amount of CPU without touching any table, so several of them running at once
-// say something about parallelism rather than about the page cache.
-const busy = `WITH RECURSIVE spin(x) AS (
-	SELECT 1 UNION ALL SELECT x + 1 FROM spin WHERE x < 2000000
-) SELECT count(*) FROM spin`
+// parallelDriver is the stock driver plus test_arrive(), a SQL function that blocks until enough statements are inside
+// it at once. Timing cannot tell parallel from sequential on a shared CI runner, but a rendezvous can.
+const parallelDriver = version.DriverName + "_paralleltest"
+
+var (
+	parallelOnce    sync.Once
+	parallelBarrier atomic.Pointer[func() int64]
+)
+
+func registerParallelDriver() {
+	parallelOnce.Do(func() {
+		sql.Register(parallelDriver, &sqlite3.SQLiteDriver{
+			ConnectHook: func(conn *sqlite3.SQLiteConn) error {
+				if err := version.Register(conn); err != nil {
+					return err
+				}
+				// Not pure: SQLite must call it once per statement rather than fold it to a constant.
+				return conn.RegisterFunc("test_arrive", func() int64 {
+					if fn := parallelBarrier.Load(); fn != nil {
+						return (*fn)()
+					}
+					return 0
+				}, false)
+			},
+		})
+	})
+}
+
+// barrier returns a function that blocks until n callers are inside it, reporting 1 to each. A caller that waits out
+// the timeout reports 0, which is what a serialized database produces: the first statement waits for peers that cannot
+// start until it finishes.
+func barrier(n int, timeout time.Duration) func() int64 {
+	var mu sync.Mutex
+	arrived := 0
+	release := make(chan struct{})
+	return func() int64 {
+		mu.Lock()
+		arrived++
+		if arrived == n {
+			close(release)
+		}
+		mu.Unlock()
+		select {
+		case <-release:
+			return 1
+		case <-time.After(timeout):
+			return 0
+		}
+	}
+}
 
 // TestParallelReads checks that statements on one database run at the same time. SQLite lets readers work in parallel
-// on separate connections, and the daemon gives every statement one, so the wall time of several of them together must
-// stay well under their sum.
+// on separate connections, and the daemon gives every statement one, so all of them can sit in test_arrive() together.
 func TestParallelReads(t *testing.T) {
 	const workers = 4
-	if runtime.NumCPU() < workers {
-		t.Skipf("needs at least %d cores to tell parallel from sequential", workers)
-	}
+	registerParallelDriver()
+	rendezvous := barrier(workers, 10*time.Second)
+	parallelBarrier.Store(&rendezvous)
+	defer parallelBarrier.Store(nil)
+
 	path := filepath.Join(t.TempDir(), "test.sqlite3")
-	seed, err := openSQLite(path, &Config{})
+	db, err := sql.Open(parallelDriver, sqliteDSN(path, nil))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if _, err := seed.Exec("CREATE TABLE t (n INTEGER)"); err != nil {
-		t.Fatalf("create table: %v", err)
-	}
-	_ = seed.Close()
-
-	db, err := openSQLite(path, &Config{Params: Params{"mode": "ro"}})
-	if err != nil {
-		t.Fatalf("open read-only: %v", err)
-	}
 	defer func() { _ = db.Close() }()
-
-	var n int
-	start := time.Now()
-	if err := db.QueryRow(busy).Scan(&n); err != nil {
-		t.Fatalf("warm-up query: %v", err)
-	}
-	single := time.Since(start)
+	// Unbounded, which is what a database without max_connections gets.
+	configurePool(db, 0)
 
 	errs := make(chan error, workers)
-	start = time.Now()
 	for i := 0; i < workers; i++ {
 		go func() {
-			var v int
-			errs <- db.QueryRow(busy).Scan(&v)
+			var met int
+			if err := db.QueryRow("SELECT test_arrive()").Scan(&met); err != nil {
+				errs <- err
+				return
+			}
+			if met != 1 {
+				errs <- errNotParallel
+				return
+			}
+			errs <- nil
 		}()
 	}
 	for i := 0; i < workers; i++ {
@@ -59,14 +102,9 @@ func TestParallelReads(t *testing.T) {
 			t.Fatalf("parallel query: %v", err)
 		}
 	}
-	parallel := time.Since(start)
-
-	// Run sequentially they would take workers × single. Half of that is far more slack than a machine with the cores for
-	// it needs, and still nowhere near what a serialized database would take.
-	if budget := time.Duration(workers) * single / 2; parallel > budget {
-		t.Errorf("%d parallel queries took %s, want under %s (one takes %s)", workers, parallel, budget, single)
-	}
 }
+
+var errNotParallel = errors.New("statement waited alone: the database ran them one at a time")
 
 // TestPoolReusesConnections checks that a busy database reuses its connections instead of opening one per statement.
 // Every open costs a file, a schema parse and a round of extension loading, so churn is the thing that makes a database
