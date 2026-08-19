@@ -27,12 +27,16 @@ FROM debian:${DEBIAN_VERSION}-slim
 RUN groupadd --system --gid 10001 lsqlited \
  && useradd --system --uid 10001 --gid 10001 \
       --home-dir /var/lib/lsqlited --shell /usr/sbin/nologin lsqlited \
- && install -d -o lsqlited -g lsqlited -m 0750 /var/lib/lsqlited /etc/lsqlited
+ && install -d -o lsqlited -g lsqlited -m 0750 /var/lib/lsqlited /etc/lsqlited \
+ && install -d -o root -g root -m 0755 /docker-entrypoint-initdb.d
 
 COPY --from=build /out/lsqlited /usr/local/bin/lsqlited
+COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 USER lsqlited:lsqlited
 WORKDIR /var/lib/lsqlited
 EXPOSE 7890
-ENTRYPOINT ["/usr/local/bin/lsqlited"]
+# The entry point seeds the databases from /docker-entrypoint-initdb.d and then
+# execs the daemon, so the flags below are still the daemon's own.
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["-config", "/etc/lsqlited/config.yaml"]

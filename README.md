@@ -214,11 +214,49 @@ db, err := sql.Open("lsqlited", "lsqlited://alice:s3cret@127.0.0.1:7890/app")
 
 Unauthenticated requests to a server with configured users are refused with `authentication required`, and a bad user name or password is refused with a deliberately vague `authentication failed`. An unknown user still gets a challenge, fabricated to look like a real one, so the handshake cannot be used to tell which accounts exist.
 
+### Initializing Databases
+
+A database the daemon creates starts out empty. `-initdb` points it at a directory of SQL scripts that seed the databases made on this start:
+
+```sh
+lsqlited -config /etc/lsqlited/config.yaml -initdb /docker-entrypoint-initdb.d
+```
+
+The layout says which database a script belongs to: a file in the directory itself is applied to every configured database, and one in a subdirectory named after a database is applied to that database alone.
+
+```
+/docker-entrypoint-initdb.d
+├── 001-common.sql          # every database
+├── app
+│   ├── 001-schema.sql      # the database named `app`
+│   └── 002-seed.sql.gz
+└── metrics
+    └── 001-schema.sql      # the database named `metrics`
+```
+
+Scripts are applied in file name order, the common ones before the ones naming a database, all on a single connection, so one script leaves its `PRAGMA`s and temporary tables to the next. Shell scripts are not executed.
+
+### Docker
+
+The published image reads the scripts mounted at `/docker-entrypoint-initdb.d`:
+
+```sh
+docker run --rm \
+  -v /etc/lsqlited:/etc/lsqlited:ro \
+  -v /srv/lsqlited/initdb:/docker-entrypoint-initdb.d:ro \
+  -v lsqlited-data:/var/lib/lsqlited \
+  -p 7890:7890 \
+  ghcr.io/chiwanpark/lsqlited:1.2634.2
+```
+
+The entry point hands the directory to the daemon and then execs it, so the arguments of the image are the flags of the daemon as before — `docker run ... ghcr.io/chiwanpark/lsqlited:1.2634.2 -config /etc/lsqlited/other.yaml`. `LSQLITED_INITDB_DIR` moves the directory, and setting it to the empty string skips initialization. Scripts are read by uid 10001, the unprivileged account the image runs as, which is also what must own the volume holding the databases.
+
 Flags:
 
 | Flag | Default | Description |
 | --- | --- | --- |
 | `-config` | `lsqlited.yaml` | Path to the YAML configuration file |
+| `-initdb` | unset | Directory of SQL scripts applied to the databases this start creates |
 | `-log-level` | `info` | Log level: `debug`, `info`, `warn`, `error` |
 | `-hash-password` | `false` | Read a password from stdin, print an `auth.users` verifier, and exit |
 | `-iterations` | `4096` | PBKDF2 iteration count used by `-hash-password` |

@@ -28,6 +28,7 @@ func limitValue(value string, unset bool) string {
 
 func main() {
 	configPath := flag.String("config", "lsqlited.yaml", "path to the YAML configuration file")
+	initdbDir := flag.String("initdb", "", "directory of SQL scripts applied to the databases this start creates")
 	logLevel := flag.String("log-level", "info", "log level (debug, info, warn, error)")
 	hashPassword := flag.Bool("hash-password", false, "read a password from stdin, print an auth.users verifier, and exit")
 	iterations := flag.Int("iterations", auth.DefaultIterations, "PBKDF2 iteration count used by -hash-password")
@@ -60,7 +61,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Installed before the databases are seeded so that a long initialization can still be interrupted.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	srv := server.New(cfg, server.WithLogger(logger))
+	if *initdbDir != "" {
+		if err := srv.InitDatabases(ctx, *initdbDir); err != nil {
+			logger.Error("failed to initialize databases", "error", err)
+			os.Exit(1)
+		}
+	}
 	if err := srv.Start(); err != nil {
 		logger.Error("failed to start server", "error", err)
 		os.Exit(1)
@@ -76,8 +87,6 @@ func main() {
 		logger.Warn("TLS is disabled, queries and results travel in cleartext")
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	<-ctx.Done()
 
 	logger.Info("shutting down")
