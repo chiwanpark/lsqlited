@@ -12,9 +12,52 @@
 
 ## Installation
 
+The daemon links the SQLite C library, so it needs CGO:
+
 ```sh
 CGO_ENABLED=1 go install github.com/chiwanpark/lsqlited/cmd/lsqlited@latest
 ```
+
+Or run the published image:
+
+```sh
+docker run --rm -v /etc/lsqlited:/etc/lsqlited ghcr.io/chiwanpark/lsqlited:1.2634.2 -config /etc/lsqlited/lsqlited.yaml
+```
+
+The driver is a separate concern: it speaks TCP and never opens a database file, so it is pure Go and builds with
+`CGO_ENABLED=0`.
+
+```sh
+go get github.com/chiwanpark/lsqlited@latest
+```
+
+## Versioning
+
+The daemon and the driver ship on one commit but carry different version schemes, because they answer to different
+consumers.
+
+| | scheme | where it comes from |
+| --- | --- | --- |
+| Daemon image | HeadVer `{head}.{yearweek}.{build}` | the release pipeline, from the `releases/v<head>` branch |
+| Driver module | semver `vX.Y.Z` | a git tag cut by hand |
+
+Container images are continuous: every push to a release branch publishes `ghcr.io/chiwanpark/lsqlited:1.<yearweek>.<run>`,
+and the version says when it was built rather than what changed.
+
+The Go module cannot work that way. `go get` resolves semver tags, and Go reads a major bump as a breaking change and a
+minor bump as a compatible addition — meaning a date in the minor field would be a lie. So library releases are tagged
+deliberately:
+
+```sh
+go get github.com/chiwanpark/lsqlited@v0.1.0
+```
+
+Tags are cut from the release branch, so a driver tag and the image built from the same commit describe the same code.
+The module is still `v0.x`: it is usable, but the API may change without a major bump until it settles.
+
+One thing to know when it does settle. Go requires a `/vN` path suffix at major version 2 and above, so a `v2.0.0` tag
+would also mean renaming the module to `github.com/chiwanpark/lsqlited/v2`. That is independent of the `releases/v2`
+branch name, which only feeds the image version.
 
 ## Running the Server
 
